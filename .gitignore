@@ -1,0 +1,32 @@
+# Secrets: never commit. .env.example is the only env file in git.
+.env
+.env.*
+!.env.example
+*.kubeconfig
+kubeconfig*
+
+# Agent run artifacts (full model/tool traces can be large and may echo
+# telemetry). Curated benchmark results live in results/ and ARE committed.
+runs/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Go
+bin/
+*.test
+*.out
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
