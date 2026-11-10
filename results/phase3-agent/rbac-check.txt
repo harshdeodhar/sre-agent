@@ -1,0 +1,41 @@
+# kubectl auth can-i, asked as the agent's identity (agent-observer.kubeconfig)
+# 2026-11-10T20:12:07Z
+
+get pods -n testbed                                  yes
+list deployments -n testbed                          yes
+get configmaps -n testbed                            yes
+list events -n testbed                               yes
+get secrets -n testbed                               no
+watch pods -n testbed                                no
+get pods --subresource=log -n testbed                no
+create pods --subresource=exec -n testbed            no
+delete pods -n testbed                               no
+patch deployments -n testbed                         no
+update deployments --subresource=scale -n testbed    no
+update configmaps -n testbed                         no
+get pods -n observability                            no
+get pods -n chaos                                    no
+get pods -n kube-system                              no
+list nodes                                           no
+list namespaces                                      no
+
+# kubectl -n testbed scale deployment/redis --replicas=2
+Error from server (Forbidden): deployments.apps "redis" is forbidden: User "system:serviceaccount:testbed:oncall-agent-observer" cannot patch resource "deployments/scale" in API group "apps" in the namespace "testbed"
+
+# kubectl -n testbed logs deploy/redis --tail=1
+Error from server (Forbidden): pods "redis-7d9d88cc-lnhpm" is forbidden: User "system:serviceaccount:testbed:oncall-agent-observer" cannot get resource "pods/log" in API group "" in the namespace "testbed"
+
+# kubectl auth can-i --list -n testbed (resource rules only)
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+selfsubjectreviews.authentication.k8s.io        []                                     []               [create]
+selfsubjectaccessreviews.authorization.k8s.io   []                                     []               [create]
+selfsubjectrulesreviews.authorization.k8s.io    []                                     []               [create]
+configmaps                                      []                                     []               [get list]
+endpoints                                       []                                     []               [get list]
+events                                          []                                     []               [get list]
+pods                                            []                                     []               [get list]
+services                                        []                                     []               [get list]
+deployments.apps                                []                                     []               [get list]
+replicasets.apps                                []                                     []               [get list]
+endpointslices.discovery.k8s.io                 []                                     []               [get list]
+events.events.k8s.io                            []                                     []               [get list]
