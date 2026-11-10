@@ -1,0 +1,77 @@
+{
+  "incident": "orders-inventory-timeout-too-short",
+  "outcome": "passed",
+  "failures": [],
+  "started_at": "2026-11-10T10:24:27+00:00",
+  "host_load_average_1m": 2.89,
+  "steady_state_wait_seconds": 62.1,
+  "baseline": {
+    "gateway_5xx_share_2m": 0.0,
+    "gateway_p99_seconds_2m": 0.0273
+  },
+  "injected_at": "2026-11-10T10:25:29+00:00",
+  "detected_after_seconds": 90.6,
+  "signals": [
+    {
+      "kind": "alert",
+      "name": "GatewayErrorRateHigh",
+      "source": null,
+      "query": null,
+      "seen_after_seconds": 90.6,
+      "value_when_seen": [],
+      "cleared_after_seconds": null
+    },
+    {
+      "kind": "evidence",
+      "name": "the gateway answers 504 on POST /api/orders",
+      "source": "prometheus",
+      "query": "sum(rate(http_server_requests_total{job=\"api-gateway\", route=\"POST /api/orders\", code=\"504\"}[1m])) > 0.5",
+      "seen_after_seconds": 35.3,
+      "value_when_seen": [
+        {
+          "metric": {},
+          "value": 0.5000100002000041
+        }
+      ],
+      "cleared_after_seconds": 53.9
+    },
+    {
+      "kind": "evidence",
+      "name": "the order service's calls to ReserveStock end in DeadlineExceeded",
+      "source": "prometheus",
+      "query": "sum(rate(grpc_client_handled_total{job=\"order-service\", grpc_method=\"ReserveStock\", grpc_code=\"DeadlineExceeded\"}[1m])) > 0.5",
+      "seen_after_seconds": 35.3,
+      "value_when_seen": [
+        {
+          "metric": {},
+          "value": 0.5844547042741882
+        }
+      ],
+      "cleared_after_seconds": 48.8
+    },
+    {
+      "kind": "evidence",
+      "name": "almost no orders are created",
+      "source": "prometheus",
+      "query": "sum(rate(orders_created_total[1m])) < 0.2",
+      "seen_after_seconds": 50.4,
+      "value_when_seen": [
+        {
+          "metric": {},
+          "value": 0.18216476628659067
+        }
+      ],
+      "cleared_after_seconds": 23.1
+    }
+  ],
+  "other_alerts": [],
+  "cleanup_started_at": "2026-11-10T10:27:00+00:00",
+  "cleanup_steps_seconds": 2.5,
+  "recovered_after_seconds": 156.5,
+  "snapshots": {
+    "pods_at_detection": "NAME                                   READY   STATUS    RESTARTS   AGE     IP           NODE                       NOMINATED NODE   READINESS GATES\napi-gateway-7674946656-pdz7x           1/1     Running   0          3h45m   10.42.0.17   k3d-sre-testbed-server-0   <none>           <none>\napi-gateway-7674946656-tvf9z           1/1     Running   0          3h45m   10.42.0.15   k3d-sre-testbed-server-0   <none>           <none>\ninventory-service-6bd7d98754-lks6h     1/1     Running   0          3h45m   10.42.0.16   k3d-sre-testbed-server-0   <none>           <none>\ninventory-service-6bd7d98754-z4zfb     1/1     Running   0          3h45m   10.42.0.18   k3d-sre-testbed-server-0   <none>           <none>\nnats-74f948cf6c-wwsw5                  2/2     Running   0          3h46m   10.42.0.5    k3d-sre-testbed-server-0   <none>           <none>\nnotification-worker-76d49cdc7c-hfk7p   1/1     Running   0          4m11s   10.42.0.29   k3d-sre-testbed-server-0   <none>           <none>\norder-service-867865557d-8f79s         1/1     Running   0          89s     10.42.0.31   k3d-sre-testbed-server-0   <none>           <none>\norder-service-867865557d-wk7r5         1/1     Running   0          90s     10.42.0.30   k3d-sre-testbed-server-0   <none>           <none>\npostgres-848d8b5984-lnszv              2/2     Running   0          3h46m   10.42.0.6    k3d-sre-testbed-server-0   <none>           <none>\nredis-7d9d88cc-lnhpm                   2/2     Running   0          3h46m   10.42.0.7    k3d-sre-testbed-server-0   <none>           <none>\n",
+    "deployments_at_detection": "NAME                  READY   UP-TO-DATE   AVAILABLE   AGE     CONTAINERS                   IMAGES                                                                       SELECTOR\napi-gateway           2/2     2            2           3h45m   api-gateway                  sre-testbed/services:dev                                                     app=api-gateway\ninventory-service     2/2     2            2           3h45m   inventory-service            sre-testbed/services:dev                                                     app=inventory-service\nnats                  1/1     1            1           3h46m   nats,nats-exporter           nats:2.11.8-alpine,natsio/prometheus-nats-exporter:0.17.3                    app=nats\nnotification-worker   1/1     1            1           3h45m   notification-worker          sre-testbed/services:dev                                                     app=notification-worker\norder-service         2/2     2            2           3h45m   order-service                sre-testbed/services:dev                                                     app=order-service\npostgres              1/1     1            1           3h46m   postgres,postgres-exporter   postgres:17.6-alpine,quay.io/prometheuscommunity/postgres-exporter:v0.17.1   app=postgres\nredis                 1/1     1            1           3h46m   redis,redis-exporter         redis:7.4.5-alpine,oliver006/redis_exporter:v1.76.0                          app=redis\n",
+    "pods_after_recovery": "NAME                                   READY   STATUS    RESTARTS   AGE     IP           NODE                       NOMINATED NODE   READINESS GATES\napi-gateway-7674946656-pdz7x           1/1     Running   0          3h48m   10.42.0.17   k3d-sre-testbed-server-0   <none>           <none>\napi-gateway-7674946656-tvf9z           1/1     Running   0          3h48m   10.42.0.15   k3d-sre-testbed-server-0   <none>           <none>\ninventory-service-6bd7d98754-lks6h     1/1     Running   0          3h48m   10.42.0.16   k3d-sre-testbed-server-0   <none>           <none>\ninventory-service-6bd7d98754-z4zfb     1/1     Running   0          3h48m   10.42.0.18   k3d-sre-testbed-server-0   <none>           <none>\nnats-74f948cf6c-wwsw5                  2/2     Running   0          3h48m   10.42.0.5    k3d-sre-testbed-server-0   <none>           <none>\nnotification-worker-76d49cdc7c-hfk7p   1/1     Running   0          6m48s   10.42.0.29   k3d-sre-testbed-server-0   <none>           <none>\norder-service-c778f8c59-gqrwc          1/1     Running   0          2m35s   10.42.0.33   k3d-sre-testbed-server-0   <none>           <none>\norder-service-c778f8c59-pv8c6          1/1     Running   0          2m36s   10.42.0.32   k3d-sre-testbed-server-0   <none>           <none>\npostgres-848d8b5984-lnszv              2/2     Running   0          3h48m   10.42.0.6    k3d-sre-testbed-server-0   <none>           <none>\nredis-7d9d88cc-lnhpm                   2/2     Running   0          3h48m   10.42.0.7    k3d-sre-testbed-server-0   <none>           <none>\n",
+    "deployments_after_recovery": "NAME                  READY   UP-TO-DATE   AVAILABLE   AGE     CONTAINERS                   IMAGES                                                                       SELECTOR\napi-gateway           2/2     2            2           3h48m   api-gateway                  sre-testbed/services:dev                                                     app=api-gateway\ninventory-service     2/2     2            2           3h48m   inventory-service            sre-testbed/services:dev                                                     app=inventory-service\nnats                  1/1     1            1           3h48m   nats,nats-exporter           nats:2.11.8-alpine,natsio/prometheus-nats-exporter:0.17.3                    app=nats\nnotification-worker   1/1     1            1           3h48m   notification-worker          sre-testbed/services:dev                                                     app=notification-worker\norder-service         2/2     2            2           3h48m   order-service                sre-testbed/services:dev                                                     app=order-service\npostgres              1/1     1            1           3h48m   postgres,postgres-exporter   postgres:17.6-alpine,quay.io/prometheuscommunity/postgres-exporter:v0.17.1   app=postgres\nredis                 1/1     1            1           3h48m   redis,redis-exporter         redis:7.4.5-alpine,oliver006/redis_exporter:v1.76.0                          app=redis\n"
+  }
+}

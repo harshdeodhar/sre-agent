@@ -1,0 +1,44 @@
+{
+  "incident": "inventory-memory-limit-too-low",
+  "outcome": "failed",
+  "failures": [
+    "injection failed: kubectl -n testbed set resources deployment/inventory-service -c inventory-service --limits=memory=20Mi exited 1: error: failed to patch resources update to pod template Deployment.apps \"inventory-service\" is invalid: spec.template.spec.containers[0].resources.requests: Invalid value: \"32Mi\": must be less than or equal to memory limit of 20Mi"
+  ],
+  "started_at": "2026-11-10T10:00:12+00:00",
+  "host_load_average_1m": 4.54,
+  "steady_state_wait_seconds": 61.7,
+  "baseline": {
+    "gateway_5xx_share_2m": 0.0,
+    "gateway_p99_seconds_2m": 0.0306
+  },
+  "injected_at": "2026-11-10T10:01:14+00:00",
+  "detected_after_seconds": null,
+  "signals": [
+    {
+      "kind": "alert",
+      "name": "ContainerRestartingRepeatedly",
+      "source": null,
+      "query": null,
+      "seen_after_seconds": null,
+      "value_when_seen": [],
+      "cleared_after_seconds": null
+    },
+    {
+      "kind": "evidence",
+      "name": "an inventory-service container was last terminated with reason OOMKilled",
+      "source": "prometheus",
+      "query": "kube_pod_container_status_last_terminated_reason{namespace=\"testbed\", container=\"inventory-service\", reason=\"OOMKilled\"} > 0",
+      "seen_after_seconds": null,
+      "value_when_seen": [],
+      "cleared_after_seconds": 0.4
+    }
+  ],
+  "other_alerts": [],
+  "cleanup_started_at": "2026-11-10T10:01:14+00:00",
+  "cleanup_steps_seconds": 0.3,
+  "recovered_after_seconds": 31.2,
+  "snapshots": {
+    "pods_after_recovery": "NAME                                   READY   STATUS    RESTARTS   AGE     IP           NODE                       NOMINATED NODE   READINESS GATES\napi-gateway-7674946656-pdz7x           1/1     Running   0          3h20m   10.42.0.17   k3d-sre-testbed-server-0   <none>           <none>\napi-gateway-7674946656-tvf9z           1/1     Running   0          3h20m   10.42.0.15   k3d-sre-testbed-server-0   <none>           <none>\ninventory-service-6bd7d98754-lks6h     1/1     Running   0          3h20m   10.42.0.16   k3d-sre-testbed-server-0   <none>           <none>\ninventory-service-6bd7d98754-z4zfb     1/1     Running   0          3h20m   10.42.0.18   k3d-sre-testbed-server-0   <none>           <none>\nnats-74f948cf6c-wwsw5                  2/2     Running   0          3h21m   10.42.0.5    k3d-sre-testbed-server-0   <none>           <none>\nnotification-worker-76d49cdc7c-bmsv2   1/1     Running   0          3h20m   10.42.0.19   k3d-sre-testbed-server-0   <none>           <none>\norder-service-c778f8c59-m4nnk          1/1     Running   0          3h20m   10.42.0.20   k3d-sre-testbed-server-0   <none>           <none>\norder-service-c778f8c59-wf45h          1/1     Running   0          3h20m   10.42.0.21   k3d-sre-testbed-server-0   <none>           <none>\npostgres-848d8b5984-lnszv              2/2     Running   0          3h21m   10.42.0.6    k3d-sre-testbed-server-0   <none>           <none>\nredis-7d9d88cc-lnhpm                   2/2     Running   0          3h21m   10.42.0.7    k3d-sre-testbed-server-0   <none>           <none>\n",
+    "deployments_after_recovery": "NAME                  READY   UP-TO-DATE   AVAILABLE   AGE     CONTAINERS                   IMAGES                                                                       SELECTOR\napi-gateway           2/2     2            2           3h20m   api-gateway                  sre-testbed/services:dev                                                     app=api-gateway\ninventory-service     2/2     2            2           3h20m   inventory-service            sre-testbed/services:dev                                                     app=inventory-service\nnats                  1/1     1            1           3h21m   nats,nats-exporter           nats:2.11.8-alpine,natsio/prometheus-nats-exporter:0.17.3                    app=nats\nnotification-worker   1/1     1            1           3h20m   notification-worker          sre-testbed/services:dev                                                     app=notification-worker\norder-service         2/2     2            2           3h20m   order-service                sre-testbed/services:dev                                                     app=order-service\npostgres              1/1     1            1           3h21m   postgres,postgres-exporter   postgres:17.6-alpine,quay.io/prometheuscommunity/postgres-exporter:v0.17.1   app=postgres\nredis                 1/1     1            1           3h21m   redis,redis-exporter         redis:7.4.5-alpine,oliver006/redis_exporter:v1.76.0                          app=redis\n"
+  }
+}

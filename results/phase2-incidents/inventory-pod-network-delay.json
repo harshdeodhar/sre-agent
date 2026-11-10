@@ -1,0 +1,74 @@
+{
+  "incident": "inventory-pod-network-delay",
+  "outcome": "passed",
+  "failures": [],
+  "started_at": "2026-11-10T11:20:37+00:00",
+  "host_load_average_1m": 7.04,
+  "steady_state_wait_seconds": 61.6,
+  "baseline": {
+    "gateway_5xx_share_2m": 0.0,
+    "gateway_p99_seconds_2m": 0.0372
+  },
+  "injected_at": "2026-11-10T11:21:39+00:00",
+  "detected_after_seconds": 90.8,
+  "signals": [
+    {
+      "kind": "alert",
+      "name": "GatewayLatencyHigh",
+      "source": null,
+      "query": null,
+      "seen_after_seconds": 90.8,
+      "value_when_seen": [],
+      "cleared_after_seconds": null
+    },
+    {
+      "kind": "alert",
+      "name": "GatewayErrorRateHigh",
+      "source": null,
+      "query": null,
+      "seen_after_seconds": 90.8,
+      "value_when_seen": [],
+      "cleared_after_seconds": null
+    },
+    {
+      "kind": "evidence",
+      "name": "one inventory-service pod handles GetStock far slower than normal",
+      "source": "prometheus",
+      "query": "histogram_quantile(0.5, sum by (pod, le) (rate(grpc_server_handling_seconds_bucket{job=\"inventory-service\", grpc_method=\"GetStock\"}[1m]))) > 0.25",
+      "seen_after_seconds": 30.5,
+      "value_when_seen": [
+        {
+          "metric": {
+            "pod": "inventory-service-6bd7d98754-lrt2v"
+          },
+          "value": 0.423076923076923
+        }
+      ],
+      "cleared_after_seconds": 31.3
+    },
+    {
+      "kind": "evidence",
+      "name": "the inventory service logs that cache reads fail",
+      "source": "loki",
+      "query": "sum(count_over_time({service_name=\"inventory-service\"} |= \"cache read failed\" [1m])) > 5",
+      "seen_after_seconds": 5.3,
+      "value_when_seen": [
+        {
+          "metric": {},
+          "value": 7.0
+        }
+      ],
+      "cleared_after_seconds": 62.3
+    }
+  ],
+  "other_alerts": [],
+  "cleanup_started_at": "2026-11-10T11:23:10+00:00",
+  "cleanup_steps_seconds": 0.4,
+  "recovered_after_seconds": 98.5,
+  "snapshots": {
+    "pods_at_detection": "NAME                                   READY   STATUS    RESTARTS   AGE     IP           NODE                       NOMINATED NODE   READINESS GATES\napi-gateway-7674946656-pdz7x           1/1     Running   0          4h41m   10.42.0.17   k3d-sre-testbed-server-0   <none>           <none>\napi-gateway-7674946656-tvf9z           1/1     Running   0          4h41m   10.42.0.15   k3d-sre-testbed-server-0   <none>           <none>\ninventory-service-6bd7d98754-lrt2v     1/1     Running   0          7m44s   10.42.0.46   k3d-sre-testbed-server-0   <none>           <none>\ninventory-service-6bd7d98754-xqk98     1/1     Running   0          7m42s   10.42.0.47   k3d-sre-testbed-server-0   <none>           <none>\nnats-74f948cf6c-wwsw5                  2/2     Running   0          4h42m   10.42.0.5    k3d-sre-testbed-server-0   <none>           <none>\nnotification-worker-76d49cdc7c-hfk7p   1/1     Running   0          60m     10.42.0.29   k3d-sre-testbed-server-0   <none>           <none>\norder-service-c778f8c59-gqrwc          1/1     Running   0          56m     10.42.0.33   k3d-sre-testbed-server-0   <none>           <none>\norder-service-c778f8c59-pv8c6          1/1     Running   0          56m     10.42.0.32   k3d-sre-testbed-server-0   <none>           <none>\npostgres-848d8b5984-lnszv              2/2     Running   0          4h42m   10.42.0.6    k3d-sre-testbed-server-0   <none>           <none>\nredis-7d9d88cc-lnhpm                   2/2     Running   0          4h42m   10.42.0.7    k3d-sre-testbed-server-0   <none>           <none>\n",
+    "deployments_at_detection": "NAME                  READY   UP-TO-DATE   AVAILABLE   AGE     CONTAINERS                   IMAGES                                                                       SELECTOR\napi-gateway           2/2     2            2           4h41m   api-gateway                  sre-testbed/services:dev                                                     app=api-gateway\ninventory-service     2/2     2            2           4h41m   inventory-service            sre-testbed/services:dev                                                     app=inventory-service\nnats                  1/1     1            1           4h42m   nats,nats-exporter           nats:2.11.8-alpine,natsio/prometheus-nats-exporter:0.17.3                    app=nats\nnotification-worker   1/1     1            1           4h41m   notification-worker          sre-testbed/services:dev                                                     app=notification-worker\norder-service         2/2     2            2           4h41m   order-service                sre-testbed/services:dev                                                     app=order-service\npostgres              1/1     1            1           4h42m   postgres,postgres-exporter   postgres:17.6-alpine,quay.io/prometheuscommunity/postgres-exporter:v0.17.1   app=postgres\nredis                 1/1     1            1           4h42m   redis,redis-exporter         redis:7.4.5-alpine,oliver006/redis_exporter:v1.76.0                          app=redis\n",
+    "pods_after_recovery": "NAME                                   READY   STATUS    RESTARTS   AGE     IP           NODE                       NOMINATED NODE   READINESS GATES\napi-gateway-7674946656-pdz7x           1/1     Running   0          4h43m   10.42.0.17   k3d-sre-testbed-server-0   <none>           <none>\napi-gateway-7674946656-tvf9z           1/1     Running   0          4h43m   10.42.0.15   k3d-sre-testbed-server-0   <none>           <none>\ninventory-service-6bd7d98754-lrt2v     1/1     Running   0          9m23s   10.42.0.46   k3d-sre-testbed-server-0   <none>           <none>\ninventory-service-6bd7d98754-xqk98     1/1     Running   0          9m21s   10.42.0.47   k3d-sre-testbed-server-0   <none>           <none>\nnats-74f948cf6c-wwsw5                  2/2     Running   0          4h44m   10.42.0.5    k3d-sre-testbed-server-0   <none>           <none>\nnotification-worker-76d49cdc7c-hfk7p   1/1     Running   0          62m     10.42.0.29   k3d-sre-testbed-server-0   <none>           <none>\norder-service-c778f8c59-gqrwc          1/1     Running   0          57m     10.42.0.33   k3d-sre-testbed-server-0   <none>           <none>\norder-service-c778f8c59-pv8c6          1/1     Running   0          57m     10.42.0.32   k3d-sre-testbed-server-0   <none>           <none>\npostgres-848d8b5984-lnszv              2/2     Running   0          4h44m   10.42.0.6    k3d-sre-testbed-server-0   <none>           <none>\nredis-7d9d88cc-lnhpm                   2/2     Running   0          4h44m   10.42.0.7    k3d-sre-testbed-server-0   <none>           <none>\n",
+    "deployments_after_recovery": "NAME                  READY   UP-TO-DATE   AVAILABLE   AGE     CONTAINERS                   IMAGES                                                                       SELECTOR\napi-gateway           2/2     2            2           4h43m   api-gateway                  sre-testbed/services:dev                                                     app=api-gateway\ninventory-service     2/2     2            2           4h43m   inventory-service            sre-testbed/services:dev                                                     app=inventory-service\nnats                  1/1     1            1           4h44m   nats,nats-exporter           nats:2.11.8-alpine,natsio/prometheus-nats-exporter:0.17.3                    app=nats\nnotification-worker   1/1     1            1           4h43m   notification-worker          sre-testbed/services:dev                                                     app=notification-worker\norder-service         2/2     2            2           4h43m   order-service                sre-testbed/services:dev                                                     app=order-service\npostgres              1/1     1            1           4h44m   postgres,postgres-exporter   postgres:17.6-alpine,quay.io/prometheuscommunity/postgres-exporter:v0.17.1   app=postgres\nredis                 1/1     1            1           4h44m   redis,redis-exporter         redis:7.4.5-alpine,oliver006/redis_exporter:v1.76.0                          app=redis\n"
+  }
+}

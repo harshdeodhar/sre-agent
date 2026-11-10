@@ -1,0 +1,72 @@
+uv run python -m oncall.chaos check --all --out results/phase2-incidents
+[gateway-crashloop-bad-duration] waiting for a steady state
+[gateway-crashloop-bad-duration] injecting
+  +   5s evidence: the gateway logs that its configuration is invalid
+  +  10s evidence: an api-gateway container is waiting in CrashLoopBackOff
+  +  71s alert: ContainerRestartingRepeatedly
+  + 151s alert: DeploymentReplicasUnavailable
+[gateway-crashloop-bad-duration] cleaning up
+[gateway-crashloop-bad-duration] passed
+[gateway-crashloop-bad-duration] record written to results/phase2-incidents/gateway-crashloop-bad-duration.json
+[inventory-memory-limit-too-low] waiting for a steady state
+[inventory-memory-limit-too-low] injecting
+  + 101s evidence: an inventory-service container was last terminated with reason OOMKilled
+  + 166s alert: ContainerRestartingRepeatedly
+[inventory-memory-limit-too-low] cleaning up
+[inventory-memory-limit-too-low] passed
+[inventory-memory-limit-too-low] record written to results/phase2-incidents/inventory-memory-limit-too-low.json
+[inventory-pod-network-delay] waiting for a steady state
+[inventory-pod-network-delay] injecting
+  +   5s evidence: the inventory service logs that cache reads fail
+  +  31s evidence: one inventory-service pod handles GetStock far slower than normal
+  +  91s alert: GatewayLatencyHigh
+  +  91s alert: GatewayErrorRateHigh
+[inventory-pod-network-delay] cleaning up
+[inventory-pod-network-delay] passed
+[inventory-pod-network-delay] record written to results/phase2-incidents/inventory-pod-network-delay.json
+[multi-worker-scaled-down-and-missing-index] waiting for a steady state
+[multi-worker-scaled-down-and-missing-index] injecting
+  +  11s evidence: the notification-worker Deployment is scaled to zero
+  +  11s evidence: the orders table is being scanned sequentially
+  +  36s evidence: the median duration of orders.list_by_customer is above 25 ms
+  +  61s evidence: more than 100 messages are pending for the notification-worker consumer
+  + 126s alert: ConsumerLagHigh
+  + 197s alert: DatabaseQuerySlow
+[multi-worker-scaled-down-and-missing-index] cleaning up
+[multi-worker-scaled-down-and-missing-index] passed
+[multi-worker-scaled-down-and-missing-index] record written to results/phase2-incidents/multi-worker-scaled-down-and-missing-index.json
+[notifications-slow-consumer] waiting for a steady state
+[notifications-slow-consumer] injecting
+  +  45s evidence: the median delay between an order and its notification is above 10 s
+  +  91s evidence: more than 100 messages are pending for the notification-worker consumer
+  + 161s alert: ConsumerLagHigh
+[notifications-slow-consumer] cleaning up
+[notifications-slow-consumer] passed
+[notifications-slow-consumer] record written to results/phase2-incidents/notifications-slow-consumer.json
+[orders-inventory-timeout-too-short] waiting for a steady state
+[orders-inventory-timeout-too-short] injecting
+  +  30s evidence: the gateway answers 504 on POST /api/orders
+  +  40s evidence: the order service's calls to ReserveStock end in DeadlineExceeded
+  +  51s evidence: almost no orders are created
+  +  91s alert: GatewayErrorRateHigh
+[orders-inventory-timeout-too-short] cleaning up
+[orders-inventory-timeout-too-short] passed
+[orders-inventory-timeout-too-short] record written to results/phase2-incidents/orders-inventory-timeout-too-short.json
+[orders-missing-index] waiting for a steady state
+[orders-missing-index] injecting
+  +  10s evidence: the orders table is being scanned sequentially
+  +  36s evidence: the median duration of orders.list_by_customer is above 25 ms
+  + 186s alert: DatabaseQuerySlow
+[orders-missing-index] cleaning up
+[orders-missing-index] passed
+[orders-missing-index] record written to results/phase2-incidents/orders-missing-index.json
+[redis-maxmemory-too-low] waiting for a steady state
+[redis-maxmemory-too-low] injecting
+  +   5s evidence: the inventory service logs that cache writes fail
+  +  10s evidence: Redis's configured memory ceiling is far below the 64 MB in its manifest
+  +  51s evidence: more than 90% of stock lookups miss the cache
+  + 221s alert: CacheHitRatioLow
+[redis-maxmemory-too-low] cleaning up
+[redis-maxmemory-too-low] passed
+[redis-maxmemory-too-low] record written to results/phase2-incidents/redis-maxmemory-too-low.json
+exit 0
