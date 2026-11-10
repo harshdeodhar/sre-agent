@@ -1,0 +1,29 @@
+LAST                   COUNT    REASON              OBJECT                                MESSAGE
+<nil>                  <none>   Scheduled           tempo-5d6865d678-fb89n                Successfully assigned observability/tempo-5d6865d678-fb89n to k3d-sre-testbed-server-0
+<nil>                  <none>   Scheduled           tempo-757756d45d-ffcf8                Successfully assigned observability/tempo-757756d45d-ffcf8 to k3d-sre-testbed-server-0
+2026-11-10T07:00:01Z   5        Unhealthy           grafana-5cb4575758-5spql              Readiness probe failed: HTTP probe failed with statuscode: 503
+2026-11-10T07:11:27Z   33       Unhealthy           tempo-757756d45d-pqzw6                Readiness probe failed: Get "http://10.42.0.13:3200/ready": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+2026-11-10T07:19:00Z   1        ScalingReplicaSet   tempo                                 Scaled down replica set tempo-757756d45d from 1 to 0
+2026-11-10T07:19:00Z   1        SuccessfulDelete    tempo-757756d45d                      Deleted pod: tempo-757756d45d-pqzw6
+2026-11-10T07:19:00Z   1        Killing             tempo-757756d45d-pqzw6                Stopping container tempo
+2026-11-10T07:19:01Z   1        ScalingReplicaSet   tempo                                 Scaled up replica set tempo-5d6865d678 from 0 to 1
+2026-11-10T07:19:01Z   1        SuccessfulCreate    tempo-5d6865d678                      Created pod: tempo-5d6865d678-fb89n
+2026-11-10T07:19:14Z   4        Unhealthy           tempo-5d6865d678-fb89n                Readiness probe failed: HTTP probe failed with statuscode: 503
+2026-11-10T07:44:23Z   3        Pulled              tempo-5d6865d678-fb89n                Container image "grafana/tempo:2.8.2" already present on machine
+2026-11-10T07:44:24Z   3        Created             tempo-5d6865d678-fb89n                Created container: tempo
+2026-11-10T07:44:30Z   3        Started             tempo-5d6865d678-fb89n                Started container tempo
+2026-11-10T07:45:55Z   71       Unhealthy           tempo-5d6865d678-fb89n                Readiness probe failed: Get "http://10.42.0.22:3200/ready": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+2026-11-10T07:52:18Z   144      Unhealthy           grafana-5cb4575758-5spql              Readiness probe failed: Get "http://10.42.0.9:3000/api/health": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+2026-11-10T07:52:20Z   143      Unhealthy           kube-state-metrics-5d689cc79b-sgh66   Readiness probe failed: Get "http://10.42.0.10:8081/readyz": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+2026-11-10T07:52:26Z   108      Unhealthy           prometheus-6c789c89db-fwtlm           Readiness probe failed: Get "http://10.42.0.12:9090/-/ready": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+2026-11-10T07:52:29Z   113      Unhealthy           otel-collector-npr6p                  Readiness probe failed: Get "http://10.42.0.14:13133/": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+2026-11-10T07:52:31Z   108      Unhealthy           loki-9b8546fb8-ptk77                  Readiness probe failed: Get "http://10.42.0.11:3100/ready": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+2026-11-10T07:53:09Z   1        Killing             tempo-5d6865d678-fb89n                Stopping container tempo
+2026-11-10T07:53:09Z   1        SuccessfulDelete    tempo-5d6865d678                      Deleted pod: tempo-5d6865d678-fb89n
+2026-11-10T07:53:09Z   1        ScalingReplicaSet   tempo                                 Scaled down replica set tempo-5d6865d678 from 1 to 0
+2026-11-10T07:53:31Z   1        SuccessfulCreate    tempo-757756d45d                      Created pod: tempo-757756d45d-ffcf8
+2026-11-10T07:53:31Z   2        ScalingReplicaSet   tempo                                 Scaled up replica set tempo-757756d45d from 0 to 1
+2026-11-10T07:53:32Z   1        Started             tempo-757756d45d-ffcf8                Started container tempo
+2026-11-10T07:53:32Z   1        Created             tempo-757756d45d-ffcf8                Created container: tempo
+2026-11-10T07:53:32Z   1        Pulled              tempo-757756d45d-ffcf8                Container image "grafana/tempo:2.8.2" already present on machine
+2026-11-10T07:53:49Z   5        Unhealthy           tempo-757756d45d-ffcf8                Readiness probe failed: HTTP probe failed with statuscode: 503

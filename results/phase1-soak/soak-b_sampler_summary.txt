@@ -1,0 +1,5 @@
+samples: 354, failed fetches: 78, minutes: 25.0
+tempo: peak heap_alloc 371 MiB, peak heap_inuse 378 MiB, peak next_gc 368 MiB, peak RSS 394 MiB, GC cycles 124
+loki: peak heap_alloc 134 MiB, peak heap_inuse 145 MiB, peak next_gc 149 MiB, peak RSS 235 MiB, GC cycles 14
+end 2026-11-10T07:47:33Z
+start 2026-11-10T07:22:27Z

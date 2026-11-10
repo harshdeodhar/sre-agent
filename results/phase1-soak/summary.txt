@@ -1,0 +1,78 @@
+== soak-a: 2026-11-10T06:42:41Z to 2026-11-10T07:07:53Z (1512 s), committed Tempo config
+gateway requests: 14089 total; 200: 11180, 201: 2683, 499: 22, 504: 205
+gateway 5xx share: 1.5%
+gateway p99 latency, max over the window: 6390 ms
+gateway p99 latency, median over the window: 1541 ms
+testbed container restarts: 0
+node working set peak: 2485 MiB
+peak working set per container (MiB):
+  observability  tempo                 356
+  observability  grafana               221
+  observability  loki                  184
+  observability  otel-collector        114
+  testbed        postgres              111
+  observability  prometheus            100
+  testbed        api-gateway            30
+  testbed        order-service          29
+  testbed        inventory-service      29
+  testbed        notification-worker    28
+  testbed        nats                   23
+  loadgen        loadgen                20
+  testbed        nats-exporter          19
+  observability  kube-state-metrics     18
+  testbed        redis-exporter         16
+  testbed        postgres-exporter      15
+  testbed        redis                  11
+
+== soak-b: 2026-11-10T07:22:27Z to 2026-11-10T07:47:33Z (1506 s), Tempo parquet_row_group_size_bytes=10000000 (tried, then reverted)
+gateway requests: 12968 total; 200: 9807, 201: 2246, 499: 71, 504: 843
+gateway 5xx share: 6.5%
+gateway p99 latency, max over the window: 10000 ms
+gateway p99 latency, median over the window: 2498 ms
+testbed container restarts: 0
+node working set peak: 2500 MiB
+peak working set per container (MiB):
+  observability  tempo                 354
+  observability  grafana               211
+  observability  loki                  196
+  observability  otel-collector        143
+  testbed        postgres              124
+  observability  prometheus            110
+  testbed        order-service          31
+  testbed        inventory-service      29
+  testbed        nats                   28
+  testbed        notification-worker    27
+  testbed        api-gateway            27
+  testbed        nats-exporter          22
+  loadgen        loadgen                22
+  observability  kube-state-metrics     21
+  testbed        redis-exporter         17
+  testbed        postgres-exporter      15
+  testbed        redis                  15
+
+== whole-run: 2026-11-10T06:40:00Z to 2026-11-10T07:56:00Z (4560 s), cluster creation to the end of the measurements
+gateway requests: 40541 total; 200: 31599, 201: 7510, 499: 121, 504: 1311
+gateway 5xx share: 3.2%
+gateway p99 latency, max over the window: 10000 ms
+gateway p99 latency, median over the window: 2154 ms
+testbed container restarts: 0
+node working set peak: 2500 MiB
+peak working set per container (MiB):
+  observability  tempo                 371
+  observability  grafana               221
+  observability  loki                  213
+  observability  otel-collector        152
+  testbed        postgres              124
+  observability  prometheus            114
+  testbed        order-service          31
+  testbed        api-gateway            30
+  testbed        notification-worker    30
+  testbed        inventory-service      29
+  testbed        nats                   28
+  testbed        nats-exporter          22
+  loadgen        loadgen                22
+  observability  kube-state-metrics     21
+  testbed        redis-exporter         18
+  testbed        postgres-exporter      15
+  testbed        redis                  15
+
