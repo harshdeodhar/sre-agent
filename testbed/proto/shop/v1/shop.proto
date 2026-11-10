@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+// Internal gRPC API between the testbed services.
+//
+//   api-gateway  -> OrderService, InventoryService
+//   order-service -> InventoryService
+package shop.v1;
+
+option go_package = "github.com/harshdeodhar/sre-agent/testbed/gen/shop/v1;shopv1";
+
+import "google/protobuf/timestamp.proto";
+
+service OrderService {
+  // CreateOrder reserves stock, stores the order, and publishes an
+  // orders.created event.
+  rpc CreateOrder(CreateOrderRequest) returns (CreateOrderResponse);
+  rpc GetOrder(GetOrderRequest) returns (GetOrderResponse);
+  // ListCustomerOrders returns a customer's most recent orders, newest first.
+  rpc ListCustomerOrders(ListCustomerOrdersRequest) returns (ListCustomerOrdersResponse);
+}
+
+service InventoryService {
+  // GetStock is the read path. It is served from the Redis cache when possible.
+  rpc GetStock(GetStockRequest) returns (GetStockResponse);
+  // ReserveStock atomically decrements available stock. It fails with
+  // FAILED_PRECONDITION when there is not enough stock.
+  rpc ReserveStock(ReserveStockRequest) returns (ReserveStockResponse);
+}
+
+message Order {
+  string id = 1;
+  string customer_id = 2;
+  string sku = 3;
+  int32 quantity = 4;
+  int64 total_cents = 5;
+  string status = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message CreateOrderRequest {
+  string customer_id = 1;
+  string sku = 2;
+  int32 quantity = 3;
+}
+
+message CreateOrderResponse {
+  Order order = 1;
+}
+
+message GetOrderRequest {
+  string id = 1;
+}
+
+message GetOrderResponse {
+  Order order = 1;
+}
+
+message ListCustomerOrdersRequest {
+  string customer_id = 1;
+}
+
+message ListCustomerOrdersResponse {
+  repeated Order orders = 1;
+}
+
+message GetStockRequest {
+  string sku = 1;
+}
+
+message GetStockResponse {
+  string sku = 1;
+  string name = 2;
+  int32 available = 3;
+  int64 price_cents = 4;
+}
+
+message ReserveStockRequest {
+  string sku = 1;
+  int32 quantity = 2;
+}
+
+message ReserveStockResponse {
+  // Unit price at the time of reservation, so the caller can total the order
+  // without a second round trip.
+  int64 price_cents = 1;
+  int32 remaining = 2;
+}

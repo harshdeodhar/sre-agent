@@ -1,0 +1,32 @@
+# golangci-lint v2 configuration. The standard set (errcheck, govet,
+# ineffassign, staticcheck, unused) plus a few linters that catch mistakes
+# specific to network services.
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose # HTTP response bodies must be closed
+    - errorlint # compare and wrap errors with errors.Is / %w
+    - gosec # integer overflow, weak randomness, unsafe file handling
+    - misspell
+    - nolintlint # a //nolint must name its linter and still be needed
+  settings:
+    nolintlint:
+      require-specific: true
+      require-explanation: true
+  exclusions:
+    paths:
+      - gen # generated protobuf code
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/harshdeodhar/sre-agent
+  exclusions:
+    paths:
+      - gen
