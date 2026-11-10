@@ -133,6 +133,30 @@ incident-check: ## Inject, confirm it shows in telemetry, clean up, confirm reco
 healthy: ## Report whether the testbed is in its intended, alert-free state
 	$(CHAOS) status
 
+# ---- Agent ---------------------------------------------------------------------
+
+AGENT := uv run python -m oncall.agent
+# Development and smoke tests use the cheapest model. Override per command.
+MODEL ?= claude-haiku-5-5
+
+# The agent reads the API key from the environment and nowhere else. This
+# loads .env into the environment of the agent's own command, and of nothing
+# else make runs. A key already exported in the shell wins. The key is never
+# on a command line and never echoed.
+LOAD_ENV := if [ -z "$${ANTHROPIC_API_KEY:-}" ] && [ -f .env ]; then set -a; . ./.env; set +a; fi
+
+.PHONY: agent
+agent: ## Investigate the alerts firing now, read-only: make agent [MODEL=<id>] [ARGS="--wait 300"]
+	@$(LOAD_ENV); $(AGENT) run --model $(MODEL) $(ARGS)
+
+.PHONY: agent-replay
+agent-replay: ## Re-run the loop from a recorded trace, with no API or cluster: make agent-replay TRACE=<trace.jsonl>
+	$(AGENT) replay $(TRACE)
+
+.PHONY: agent-kubeconfig
+agent-kubeconfig: ## Write agent-observer.kubeconfig, the agent's read-only cluster identity
+	$(AGENT) kubeconfig
+
 # ---- Development ---------------------------------------------------------------
 
 .PHONY: test
