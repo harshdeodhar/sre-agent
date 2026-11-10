@@ -48,7 +48,8 @@ Apple M1, 8 GB RAM. The whole cluster should fit in a 4 GB Docker VM.
 | Path | Contents |
 |---|---|
 | `testbed/` | Go module: services under `cmd/`, shared code under `internal/` |
-| `deploy/` | kustomize manifests (cluster, testbed, observability, rbac, chaos) |
+| `deploy/` | kustomize manifests (cluster, testbed, loadgen, observability, rbac, chaos) |
+| `scripts/` | `verify_testbed.py`, the acceptance check behind `make verify` |
 | `incidents/` | One YAML per incident, validated against a JSON schema |
 | `src/oncall/agent/` | Tool loop, tools, guardrails, report, trace |
 | `src/oncall/chaos/` | Incident parsing, inject, cleanup |
@@ -61,7 +62,25 @@ Apple M1, 8 GB RAM. The whole cluster should fit in a 4 GB Docker VM.
 
 Added as phases land; do not document a target here until it exists and works.
 
-*(none yet: Phase 0)*
+`make help` lists every target. All of them use the repo-local kubeconfig
+(`sre-testbed.kubeconfig`); for ad-hoc `kubectl`, export `KUBECONFIG` to it.
+
+| Command | What it does |
+|---|---|
+| `make up` | Create the cluster, build and load the image, deploy everything, wait until available |
+| `make down` | Delete the cluster and its kubeconfig |
+| `make verify` | Assert that live traffic shows up in Prometheus, Loki, Tempo and Grafana |
+| `make status` | Pods, restarts, and memory use |
+| `make deploy` | Re-apply manifests after editing `deploy/` |
+| `make redeploy` | Rebuild the services image and roll the Go services |
+| `make test` | Go unit tests |
+| `make lint` | `go vet`, `golangci-lint`, `ruff`, and a kustomize render check |
+| `make dashboards` | Regenerate the Grafana dashboard JSON from `generate.py` |
+| `make proto` | Regenerate gRPC code from `testbed/proto` |
+
+Do not run a Go build, `make image` or `make redeploy` while a benchmark or a
+measurement is in progress: on this machine it starves the cluster (see "Known
+limits" in `docs/ARCHITECTURE.md`).
 
 ## Conventions
 

@@ -1,8 +1,9 @@
 # Architecture
 
-> **Status: Phase 0 design.** Nothing described here is built yet. Each section
-> is updated when its phase lands, and anything marked "to verify" is an
-> assumption that a later phase must confirm by running it.
+> **Status: Phase 1 built** (testbed, observability, load generator). The
+> incident library, agent and harness sections are still design. Each section is
+> updated when its phase lands, and anything marked "to verify" is an assumption
+> that a later phase must confirm by running it.
 
 ## What this is
 
@@ -32,15 +33,20 @@ flowchart TB
   end
 
   subgraph cluster["k3d cluster (single node)"]
+    subgraph lgns["namespace: loadgen"]
+      lg["loadgen"]
+    end
     subgraph tb["namespace: testbed  (the only namespace the agent can touch)"]
-      lg["loadgen"] -->|HTTP| gw["api-gateway"]
-      gw -->|gRPC| ord["order-service"]
-      ord -->|gRPC| inv["inventory-service"]
+      lg -->|HTTP| gw["api-gateway"]
+      gw -->|"gRPC (orders)"| ord["order-service"]
+      gw -->|"gRPC (product reads)"| inv["inventory-service"]
+      ord -->|"gRPC (reserve stock)"| inv
       ord --> pg[("Postgres")]
       inv --> pg
       inv --> rd[("Redis cache")]
       ord -->|orders.created| js[["NATS JetStream"]]
       js --> nw["notification-worker"]
+      nw --> pg
     end
     subgraph ob["namespace: observability"]
       otel["OTel Collector"] --> loki["Loki"]
@@ -67,39 +73,174 @@ flowchart TB
 
 ## Testbed
 
-**Request flow.** `loadgen` sends a steady mix of reads (stock lookups) and
-writes (place order) to `api-gateway` over HTTP. The gateway calls
-`order-service` over gRPC, which reserves stock from `inventory-service` (gRPC),
-writes the order to Postgres, and publishes `orders.created` to NATS JetStream.
-`notification-worker` consumes that stream with a durable pull consumer.
-`inventory-service` reads through a Redis cache backed by Postgres.
+**Request flow.** `loadgen` sends 10 requests per second to `api-gateway` over
+HTTP: 70% product lookups, 20% new orders, 5% order lookups, 5% order lists.
+
+| Route | Path through the system |
+|---|---|
+| `GET /api/products/{sku}` | gateway → `inventory-service` → Redis cache, falling back to Postgres |
+| `POST /api/orders` | gateway → `order-service` → `inventory-service` (reserve stock) → Postgres, then publish `orders.created` to NATS JetStream |
+| `GET /api/orders/{id}`, `GET /api/customers/{id}/orders` | gateway → `order-service` → Postgres |
+
+`notification-worker` consumes `orders.created` with a durable pull consumer and
+records each notification in Postgres.
 
 This gives one synchronous chain three services deep (for cascading failures and
 latency propagation) and one asynchronous branch (for consumer lag), with a
-cache and a database that can each fail in their own ways.
+cache and a database that can each fail in their own ways. The gateway reads
+products from `inventory-service` directly rather than through `order-service`,
+so a fault in one of the two back-end services degrades some routes and not
+others, which is what makes the per-route panels worth looking at.
 
-**Stack.** Go 1.24, one module, one Dockerfile. Standard library `net/http` and
-`log/slog` (JSON logs carrying `trace_id`), `grpc-go`, `pgx`, `go-redis`,
-`nats.go`, `prometheus/client_golang`, and the OpenTelemetry SDK.
+**Stack.** Go 1.26, one module, one image holding all five binaries (each
+Deployment picks its binary with `command`): one build, and one image to load
+into the cluster. Standard library `net/http` and `log/slog` (JSON logs carrying
+`trace_id` and `span_id`), `grpc-go`, `pgx`, `go-redis`, `nats.go`,
+`prometheus/client_golang`, and the OpenTelemetry SDK.
+
+**Trace context over NATS.** The trace has to survive the hop through the
+message broker for one trace to cover a whole order. OpenTelemetry's stock
+header carrier writes `Traceparent`; NATS header names are case-sensitive and
+the server rewrites that header to lower-case `traceparent`, so the stock
+carrier silently finds nothing on the consuming side. `internal/events` has its
+own small carrier and a round-trip test for this.
 
 **Cluster.** k3d (k3s in Docker), single node. Chosen over kind because k3s
 idles at a lower memory footprint, and this project has to fit on an 8 GB
 laptop. Manifests are plain YAML with kustomize (built into `kubectl`), not
 Helm: every line deployed is in the repo and readable.
 
+`make up` writes a kubeconfig containing only this cluster into the repository
+directory (gitignored), and every command uses that file. `~/.kube/config` is
+never read or written, so nothing here can act on another cluster by mistake.
+All published ports are bound to 127.0.0.1.
+
+**Deploy order.** `make deploy` applies Postgres, Redis and NATS first and waits
+for them, then applies everything else. The services would get there anyway by
+retrying and restarting, but then a freshly created cluster shows a different
+restart count on healthy pods each time, and restart counts are evidence the
+agent reads.
+
+**Probes.** Readiness turns true once a service has connected to its
+dependencies at startup and does not re-check them afterwards: if every replica
+went unready whenever Postgres was slow, the service would vanish from its
+Service instead of failing requests individually and visibly. Liveness is
+deliberately slow: a restart only after a full minute without an answer. It exists to catch a hung
+process, not a slow one. This was learned by breaking it: with the default
+liveness settings, a 20-second stall of the kubelet itself (the host was short
+of memory during a large compile) made every probe time out at once, and every
+healthy Go container was restarted in the same second.
+
+**The load generator has its own namespace** (`loadgen`), outside the one the
+agent can touch. It is the customer, not part of the system being operated.
+
 **Observability, sized for 8 GB.**
 
 | Signal | Component | Notes |
 |---|---|---|
-| Metrics | Prometheus + kube-state-metrics | Plain Prometheus, short retention. No Alertmanager: alert rules are evaluated by Prometheus and read from its API. |
-| Logs | Loki (single binary) | Filesystem storage. |
-| Traces | Tempo (single binary) | Chosen over Jaeger because Grafana links traces to logs natively. |
-| Collection | One OTel Collector | Tails pod logs to Loki and receives OTLP traces for Tempo. |
-| Dashboards | Grafana | Datasources and dashboards provisioned from files in the repo. |
+| Metrics | Prometheus, kube-state-metrics, kubelet cAdvisor, exporter sidecars for Postgres, Redis and NATS | Plain Prometheus, 10 s scrape, 12 h retention. No Alertmanager: alert rules will be evaluated by Prometheus and read from its API (rules arrive with the incidents in Phase 2). |
+| Logs | Loki (single binary) | Filesystem storage, 24 h retention. |
+| Traces | Tempo (single binary) | Local disk, 12 h retention. Chosen over Jaeger because Grafana links traces to logs natively. |
+| Collection | One OTel Collector (DaemonSet) | Tails container log files to Loki and receives OTLP traces for Tempo. Metrics do not pass through it. |
+| Dashboards | Grafana | Datasources and one dashboard provisioned from files in the repo. The dashboard JSON is generated by `deploy/observability/dashboards/generate.py`, so its queries are reviewable as code. |
 
-Every container gets explicit memory requests and limits. Target is roughly
-2.5 GB for the whole cluster inside a 4 GB Docker VM. *To verify in Phase 1:*
-actual usage, reported from `kubectl top` and `docker stats`.
+**Telemetry is scoped on purpose.** The collector reads only
+`/var/log/pods/testbed_*`, kube-state-metrics watches only the `testbed`
+namespace, and Prometheus discovers pods only in `testbed`, `loadgen` and
+`observability`. Whatever the incident injector does in the `chaos` namespace
+cannot show up in a log line or a metric, so the agent cannot find the answer by
+reading the injector's telemetry.
+
+**Three things the collector does that were learned by running it:**
+
+- It lower-cases log severity. Go's `slog` writes `ERROR` and Loki's own
+  detection on plain-text lines yields `error`; without this, one filter cannot
+  cover the namespace.
+- It keeps its read positions on the node's disk. A restarted collector
+  otherwise re-reads every log file from the top, which was measured to trip its
+  memory limiter and then Loki's ingestion limits.
+- It caps batch size, because an uncapped backlog went to Loki as requests
+  larger than Loki's per-second ingestion limit and was rejected whole.
+
+`make verify` (`scripts/verify_testbed.py`) is the acceptance check for all of
+this: it sends real requests through the gateway and then asserts that
+Prometheus has every expected scrape target and live traffic, that every query
+on the dashboard returns data, that Loki has logs from each service with trace
+IDs and from no other namespace, that Tempo holds a single trace spanning all
+four services, and that Grafana can reach all three data sources.
+
+**Memory.** Every container has an explicit memory request and limit. There are
+no CPU limits: on a single shared node they would only add throttling noise, and
+a CPU limit is something an incident can introduce.
+
+Memory in MiB. "Peak" is the highest working set cAdvisor reported for any
+replica in the first 76 minutes of a fresh cluster at the default load. The host
+was short of memory for most of that time (see "Known limits" below), so read
+the peaks as "under stress", not as a quiet-host baseline. Raw data:
+[`results/phase1-soak/`](../results/phase1-soak/).
+
+| Container | Replicas | Request | Limit | Peak |
+|---|---|---|---|---|
+| tempo | 1 | 96 | 384 | 371 |
+| grafana | 1 | 96 | 256 | 221 |
+| loki | 1 | 96 | 256 | 213 |
+| otel-collector | 1 | 96 | 200 | 152 |
+| postgres | 1 | 192 | 384 | 124 |
+| prometheus | 1 | 128 | 384 | 114 |
+| order-service | 2 | 32 | 96 | 31 |
+| api-gateway | 2 | 32 | 96 | 30 |
+| notification-worker | 1 | 32 | 96 | 30 |
+| inventory-service | 2 | 32 | 96 | 29 |
+| nats | 1 | 32 | 128 | 28 |
+| nats-exporter | 1 | 16 | 64 | 22 |
+| loadgen | 1 | 24 | 64 | 22 |
+| kube-state-metrics | 1 | 24 | 64 | 21 |
+| redis-exporter | 1 | 16 | 64 | 18 |
+| postgres-exporter | 1 | 24 | 64 | 15 |
+| redis | 1 | 32 | 128 | 15 |
+| **Total across replicas** | | **1096** | **3112** | |
+
+The whole node, k3s included, peaked at a 2500 MiB working set inside the
+4 GB Docker VM.
+
+Go processes (the collector, Tempo, Loki and the testbed services) get a
+`GOMEMLIMIT` at roughly 80% of their container limit, so the runtime collects
+garbage harder near the ceiling instead of being OOM-killed. It is a soft limit
+and not a guarantee, as Tempo shows below.
+
+**Known limits of a laptop-sized testbed.**
+
+- *Warm-up.* For the first minutes after `make up`, while everything starts at
+  once, the gateway returns some errors. The harness must wait for a
+  steady-state check to pass before injecting anything (Phase 5).
+- *Host memory.* A 4 GB VM on an 8 GB Mac leaves little for anything else. With
+  a browser and an editor open, macOS swapped the VM's memory in and out
+  continuously, and the testbed slowed down as a whole: every container's CPU
+  use rose several-fold at the same moments, including idle ones. In two
+  25-minute runs with no fault injected, the gateway returned 504 for 1.5% and
+  6.5% of requests, with a median p99 of 1.5 s and 2.5 s. In a quiet stretch of
+  the first run the p99 was 25 to 56 ms with no errors, which is what the
+  testbed does when the host lets it. **A benchmark run is only meaningful on a
+  quiet host.**
+- *Host stalls restart containers.* During a large compile on the Mac the
+  kubelet missed its own lease renewals and healthy containers were restarted.
+  Liveness probes are now tolerant of this: no testbed container restarted in
+  either run above. *To do in Phase 5:* the harness records restart counts,
+  scrape gaps and baseline error rate around each incident and discards, rather
+  than scores, a run where the platform itself misbehaved.
+- *Tempo is the tightest fit.* It stores very little data at this load, but
+  writing and compacting its Parquet blocks allocates memory in bursts: those
+  two code paths made 72% of all allocations in a heap profile of the first
+  run, and the live heap was 172 MiB at one profile and 71 MiB at another. Its
+  working set peaked at 356 MiB of 384 in the first run. In the second it
+  restarted twice, at least once OOM-killed. A smaller Parquet row group
+  (`parquet_row_group_size_bytes`) was tried in that second run and reverted:
+  it did not lower the peak. *Open:* re-measure on a quiet host before deciding
+  between a higher limit and a different setting.
+- *OOM kills do not show in cAdvisor's counter.* `container_oom_events_total`
+  stayed at zero although Tempo was OOM-killed. *To verify in Phase 2:* detect
+  OOM kills in `testbed` from kube-state-metrics' last-terminated reason
+  instead.
 
 ## Incident library
 
@@ -226,22 +367,27 @@ estimate, and the report will say so.
 
 ```
 .
-├── Makefile                 # up, down, test, lint, inject, bench
+├── Makefile                 # up, down, verify, test, lint; later inject, bench
 ├── CLAUDE.md                # conventions for AI-assisted work on this repo
 ├── .env.example
+├── pyproject.toml           # Python tool config; the package itself comes in Phase 2
 ├── docs/                    # ARCHITECTURE.md, later RUBRIC.md, GUARDRAILS.md
+├── scripts/                 # verify_testbed.py: the Phase 1 acceptance check
 ├── testbed/                 # Go module
 │   ├── cmd/                 # api-gateway, order-service, inventory-service,
 │   │                        # notification-worker, loadgen
-│   ├── internal/            # shared: telemetry, config, storage
-│   ├── proto/
+│   ├── internal/            # shared: config, telemetry, ops (health, metrics),
+│   │                        # rpc, store, events, retry
+│   ├── proto/               # gRPC definitions; generated code in gen/
 │   └── Dockerfile
 ├── deploy/                  # kustomize manifests
-│   ├── k3d/                 # cluster config
-│   ├── testbed/             # services, Postgres, Redis, NATS
-│   ├── observability/       # Prometheus, Loki, Tempo, collector, Grafana
-│   ├── rbac/                # agent ServiceAccounts and Roles
-│   └── chaos/               # netem helper
+│   ├── cluster/             # k3d cluster config
+│   ├── testbed/             # stores/ (Postgres, Redis, NATS), services/
+│   ├── loadgen/
+│   ├── observability/       # Prometheus, Loki, Tempo, collector, Grafana,
+│   │                        # kube-state-metrics; config/ and dashboards/
+│   ├── rbac/                # (Phase 3) agent ServiceAccounts and Roles
+│   └── chaos/               # (Phase 2) netem helper
 ├── incidents/               # one YAML per incident + JSON schema
 ├── src/oncall/              # Python package
 │   ├── agent/               # loop, llm client, tools/, guardrails/, report, trace
