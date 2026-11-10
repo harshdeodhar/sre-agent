@@ -1,0 +1,104 @@
+# api-gateway: the HTTP front door. Translates REST calls into gRPC calls to
+# order-service and inventory-service.
+#
+# All configuration is plain environment variables on the Deployment. A config
+# change is therefore a new ReplicaSet with a revision number, visible in
+# `kubectl rollout history` and reversible with `kubectl rollout undo`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: testbed
+  labels:
+    app: api-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      containers:
+        - name: api-gateway
+          image: sre-testbed/services:dev
+          # The image is built locally and loaded into the cluster by
+          # `make up`; it exists in no registry, so never try to pull it.
+          imagePullPolicy: Never
+          command: [/usr/local/bin/api-gateway]
+          env:
+            # "dns:///" plus a headless Service makes the gRPC client resolve
+            # every pod IP and balance across them itself. Through a normal
+            # ClusterIP a long-lived HTTP/2 connection would pin all requests
+            # to one pod.
+            - name: ORDER_SERVICE_ADDR
+              value: dns:///order-service.testbed.svc.cluster.local:9000
+            - name: INVENTORY_SERVICE_ADDR
+              value: dns:///inventory-service.testbed.svc.cluster.local:9000
+            - name: UPSTREAM_TIMEOUT
+              value: 2s
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4317
+            # Soft heap target for the Go runtime, set below the container
+            # limit so the garbage collector works harder before the kernel's
+            # OOM killer gets involved.
+            - name: GOMEMLIMIT
+              value: 80MiB
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: ops
+              containerPort: 8081
+          # Liveness is deliberately slow to act: a restart only after a full
+          # minute without an answer (6 probes of 5 s). It exists to catch a
+          # hung process, not a slow one. With the defaults (1 s, 3 failures),
+          # a 20 s stall of the kubelet itself, seen when the host ran short
+          # of memory, restarted every healthy container at the same moment.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: ops
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: ops
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            # A memory limit but no CPU limit: memory cannot be shared, so it
+            # needs a hard cap. A CPU limit would only add throttling to pods
+            # that are well-behaved.
+            limits:
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: testbed
+spec:
+  # NodePort 30080 is mapped to localhost:8080 by the k3d cluster config.
+  type: NodePort
+  selector:
+    app: api-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      nodePort: 30080

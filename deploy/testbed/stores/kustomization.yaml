@@ -1,0 +1,28 @@
+# The data stores: Postgres, Redis and NATS.
+#
+# They are a separate kustomization so `make deploy` can apply them first and
+# wait for them. On a new cluster Postgres has to be pulled and then seeded,
+# which takes longer than the services are willing to wait for it at startup;
+# applied all at once, the services exit and are restarted a couple of times.
+# That converges, but it leaves a restart count on healthy pods that varies
+# from one cluster to the next, and restart counts are evidence in an incident.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - postgres.yaml
+  - redis.yaml
+  - nats.yaml
+
+configMapGenerator:
+  - name: postgres-init
+    namespace: testbed
+    files:
+      - postgres-init/01-schema.sql
+      - postgres-init/02-seed.sql
+
+generatorOptions:
+  # Keep the ConfigMap name stable. The init scripts only run when Postgres
+  # starts on an empty data directory, so a content-hash suffix (which would
+  # roll the pod on every edit) would wipe the database as a side effect.
+  disableNameSuffixHash: true

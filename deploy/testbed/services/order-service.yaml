@@ -1,0 +1,109 @@
+# order-service: creates and reads orders. For each new order it reserves
+# stock (gRPC to inventory-service), stores the order (Postgres) and publishes
+# an orders.created event (NATS JetStream).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: testbed
+  labels:
+    app: order-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      containers:
+        - name: order-service
+          image: sre-testbed/services:dev
+          imagePullPolicy: Never
+          command: [/usr/local/bin/order-service]
+          env:
+            - name: INVENTORY_SERVICE_ADDR
+              value: dns:///inventory-service.testbed.svc.cluster.local:9000
+            - name: INVENTORY_TIMEOUT
+              value: 1s
+            - name: NATS_URL
+              value: nats://nats.testbed.svc.cluster.local:4222
+            - name: PUBLISH_TIMEOUT
+              value: 500ms
+            - name: DB_HOST
+              value: postgres.testbed.svc.cluster.local
+            - name: DB_NAME
+              value: shop
+            - name: DB_USER
+              value: shop
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            # Per replica. All services together must stay under Postgres's
+            # max_connections (60): 2x10 here, 2x10 inventory-service, 4 for
+            # the worker, 1 for the exporter.
+            - name: DB_MAX_CONNS
+              value: "10"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4317
+            - name: GOMEMLIMIT
+              value: 80MiB
+          ports:
+            - name: grpc
+              containerPort: 9000
+            - name: ops
+              containerPort: 8081
+          # Liveness is deliberately slow to act: a restart only after a full
+          # minute without an answer (6 probes of 5 s). It exists to catch a
+          # hung process, not a slow one. With the defaults (1 s, 3 failures),
+          # a 20 s stall of the kubelet itself, seen when the host ran short
+          # of memory, restarted every healthy container at the same moment.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: ops
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          # Startup waits up to 30 s for Postgres and NATS before giving up;
+          # readiness turns true only once both have answered.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: ops
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: testbed
+spec:
+  # Headless: DNS returns the pod IPs themselves, which is what client-side
+  # gRPC load balancing needs. Only ready pods are listed.
+  clusterIP: None
+  selector:
+    app: order-service
+  ports:
+    - name: grpc
+      port: 9000
+      targetPort: grpc

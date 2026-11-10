@@ -1,0 +1,110 @@
+# NATS with JetStream: carries orders.created events from order-service to
+# notification-worker. The stream and its consumer are created by the services
+# themselves at startup (testbed/internal/events), not here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  namespace: testbed
+data:
+  nats.conf: |
+    port: 4222
+    # Monitoring endpoint, read by the exporter sidecar.
+    http_port: 8222
+
+    jetstream {
+      store_dir: /data
+      # Without explicit limits JetStream sizes itself from the host's memory
+      # and disk, which inside a container are the node's, not the pod's.
+      max_memory_store: 32MB
+      max_file_store: 256MB
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  namespace: testbed
+  labels:
+    app: nats
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "7777"
+    spec:
+      containers:
+        - name: nats
+          image: nats:2.11.8-alpine
+          command: [nats-server, --config, /etc/nats/nats.conf]
+          ports:
+            - name: client
+              containerPort: 4222
+            - name: monitor
+              containerPort: 8222
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: monitor
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nats
+              readOnly: true
+            - name: data
+              mountPath: /data
+        # Turns the NATS monitoring endpoint into Prometheus metrics, including
+        # per-consumer JetStream numbers (pending and unacknowledged messages),
+        # which is how consumer lag becomes visible. ~15 MB.
+        - name: nats-exporter
+          image: natsio/prometheus-nats-exporter:0.17.3
+          args:
+            - -varz
+            - -connz
+            - -jsz=all
+            - http://localhost:8222
+          ports:
+            - name: metrics
+              containerPort: 7777
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+      volumes:
+        - name: config
+          configMap:
+            name: nats-config
+        # emptyDir: the stream is recreated empty if the pod is replaced. See
+        # the same note in postgres.yaml.
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: testbed
+spec:
+  selector:
+    app: nats
+  ports:
+    - name: client
+      port: 4222
+      targetPort: client

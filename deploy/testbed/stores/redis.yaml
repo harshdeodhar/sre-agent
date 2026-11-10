@@ -1,0 +1,79 @@
+# Redis: read-through cache for stock lookups in inventory-service. It holds
+# nothing that cannot be rebuilt from Postgres.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: testbed
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4.5-alpine
+          args:
+            # Pure cache: no snapshots, no append-only file.
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            # Cap the data set well below the container limit, and evict the
+            # least recently used keys when the cap is reached instead of
+            # refusing writes.
+            - --maxmemory
+            - 64mb
+            - --maxmemory-policy
+            - allkeys-lru
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: [redis-cli, ping]
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+        # Exposes Redis INFO (memory, hits and misses, evictions, clients) as
+        # Prometheus metrics. ~15 MB.
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.76.0
+          ports:
+            - name: metrics
+              containerPort: 9121
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: testbed
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis

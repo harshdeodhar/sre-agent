@@ -1,0 +1,78 @@
+# Load generator: steady background traffic against the api-gateway.
+#
+# It lives in its own namespace on purpose. The on-call agent is only allowed
+# to act inside "testbed"; keeping the traffic source outside means the agent
+# can never "fix" an incident by turning the traffic off.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loadgen
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: loadgen
+  labels:
+    app: loadgen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      containers:
+        - name: loadgen
+          image: sre-testbed/services:dev
+          imagePullPolicy: Never
+          command: [/usr/local/bin/loadgen]
+          env:
+            - name: TARGET_URL
+              value: http://api-gateway.testbed.svc.cluster.local:8080
+            # Requests started per second, regardless of how fast responses
+            # come back (open loop).
+            - name: RPS
+              value: "10"
+            - name: REQUEST_TIMEOUT
+              value: 5s
+            # Must match the seed data in deploy/testbed/postgres-init.
+            - name: SKU_COUNT
+              value: "200"
+            - name: CUSTOMER_COUNT
+              value: "5000"
+            - name: GOMEMLIMIT
+              value: 48MiB
+          ports:
+            - name: ops
+              containerPort: 8081
+          # Liveness is deliberately slow to act: a restart only after a full
+          # minute without an answer (6 probes of 5 s). It exists to catch a
+          # hung process, not a slow one. With the defaults (1 s, 3 failures),
+          # a 20 s stall of the kubelet itself, seen when the host ran short
+          # of memory, restarted every healthy container at the same moment.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: ops
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 25m
+              memory: 24Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]

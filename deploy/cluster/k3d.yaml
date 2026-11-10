@@ -1,0 +1,51 @@
+# k3d cluster for the testbed: one k3s server node running in Docker.
+#
+# Sized for an 8 GB laptop: a single node, no agent nodes, and the k3s extras
+# this project does not use switched off.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: sre-testbed
+servers: 1
+agents: 0
+# Pinned so every `make up` gets the same Kubernetes version.
+image: rancher/k3s:v1.33.6-k3s1
+kubeAPI:
+  hostIP: 127.0.0.1
+  hostPort: "6550"
+ports:
+  # Host port -> NodePort on the server node. Bound to 127.0.0.1 so nothing in
+  # the testbed is reachable from the network: Grafana runs with anonymous
+  # admin access, which is only acceptable on loopback.
+  - port: 127.0.0.1:8080:30080 # api-gateway
+    nodeFilters: [server:0:direct]
+  - port: 127.0.0.1:3000:30030 # Grafana
+    nodeFilters: [server:0:direct]
+  - port: 127.0.0.1:9090:30090 # Prometheus
+    nodeFilters: [server:0:direct]
+  - port: 127.0.0.1:3100:30100 # Loki
+    nodeFilters: [server:0:direct]
+  - port: 127.0.0.1:3200:30200 # Tempo
+    nodeFilters: [server:0:direct]
+options:
+  k3d:
+    wait: true
+    timeout: 180s
+    # k3d normally adds an nginx container in front of the API server and the
+    # mapped ports. With one node it adds nothing but memory, so ports are
+    # mapped straight onto the node (the ":direct" suffix above).
+    disableLoadbalancer: true
+  k3s:
+    extraArgs:
+      # No Ingress controller and no LoadBalancer implementation: services are
+      # exposed with NodePorts. metrics-server stays, for `kubectl top`.
+      - arg: --disable=traefik
+        nodeFilters: [server:*]
+      - arg: --disable=servicelb
+        nodeFilters: [server:*]
+  kubeconfig:
+    # Do not touch ~/.kube/config. `make up` writes a kubeconfig holding only
+    # this cluster into the repo directory, and every tool here uses that file,
+    # so nothing in this project can act on any other cluster by accident.
+    updateDefaultKubeconfig: false
+    switchCurrentContext: false

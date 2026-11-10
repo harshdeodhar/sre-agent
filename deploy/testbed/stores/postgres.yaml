@@ -1,0 +1,121 @@
+# Postgres: the system of record for stock, orders and notifications.
+#
+# The password comes from the Secret "postgres-credentials", which `make up`
+# generates with a random value. It is never written to this repository.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: testbed
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two Postgres processes must never run against
+  # the same data directory, even briefly.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17.6-alpine
+          args:
+            # Sized for the container's memory limit, not for a real server.
+            - -c
+            - shared_buffers=64MB
+            - -c
+            - max_connections=60
+            # Log any statement slower than 250 ms, as a production database
+            # normally would.
+            - -c
+            - log_min_duration_statement=250
+          env:
+            - name: POSTGRES_USER
+              value: shop
+            - name: POSTGRES_DB
+              value: shop
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            # A subdirectory, because the volume's root may contain lost+found.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          # -h 127.0.0.1 matters: while the init scripts run, Postgres listens
+          # on its Unix socket only, so this probe stays false until seeding
+          # has finished and the real server is up.
+          readinessProbe:
+            exec:
+              command: [pg_isready, -h, 127.0.0.1, -U, shop, -d, shop]
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+        # Exposes Postgres statistics (connections, locks, transaction rates)
+        # as Prometheus metrics. ~20 MB.
+        - name: postgres-exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.17.1
+          env:
+            - name: DATA_SOURCE_URI
+              value: localhost:5432/shop?sslmode=disable
+            - name: DATA_SOURCE_USER
+              value: shop
+            - name: DATA_SOURCE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+          ports:
+            - name: metrics
+              containerPort: 9187
+          resources:
+            requests:
+              cpu: 10m
+              memory: 24Mi
+            limits:
+              memory: 64Mi
+      volumes:
+        # emptyDir: the database is rebuilt from the seed scripts whenever the
+        # pod is recreated. The testbed has no data worth keeping, and a known
+        # starting state is exactly what repeatable incidents need.
+        - name: data
+          emptyDir: {}
+        - name: init
+          configMap:
+            name: postgres-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: testbed
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

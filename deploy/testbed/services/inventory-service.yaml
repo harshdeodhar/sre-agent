@@ -1,0 +1,104 @@
+# inventory-service: stock levels. Reads go through the Redis cache and fall
+# back to Postgres; reservations are atomic updates in Postgres.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service
+  namespace: testbed
+  labels:
+    app: inventory-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inventory-service
+  template:
+    metadata:
+      labels:
+        app: inventory-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      containers:
+        - name: inventory-service
+          image: sre-testbed/services:dev
+          imagePullPolicy: Never
+          command: [/usr/local/bin/inventory-service]
+          env:
+            - name: REDIS_ADDR
+              value: redis.testbed.svc.cluster.local:6379
+            # How long a cached stock level may be served before it is read
+            # from Postgres again.
+            - name: CACHE_TTL
+              value: 30s
+            # Upper bound on what a broken cache can add to one read.
+            - name: CACHE_TIMEOUT
+              value: 250ms
+            - name: RESTOCK_INTERVAL
+              value: 30s
+            - name: DB_HOST
+              value: postgres.testbed.svc.cluster.local
+            - name: DB_NAME
+              value: shop
+            - name: DB_USER
+              value: shop
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            - name: DB_MAX_CONNS
+              value: "10"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4317
+            - name: GOMEMLIMIT
+              value: 80MiB
+          ports:
+            - name: grpc
+              containerPort: 9000
+            - name: ops
+              containerPort: 8081
+          # Liveness is deliberately slow to act: a restart only after a full
+          # minute without an answer (6 probes of 5 s). It exists to catch a
+          # hung process, not a slow one. With the defaults (1 s, 3 failures),
+          # a 20 s stall of the kubelet itself, seen when the host ran short
+          # of memory, restarted every healthy container at the same moment.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: ops
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: ops
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-service
+  namespace: testbed
+spec:
+  clusterIP: None # headless, see order-service.yaml
+  selector:
+    app: inventory-service
+  ports:
+    - name: grpc
+      port: 9000
+      targetPort: grpc

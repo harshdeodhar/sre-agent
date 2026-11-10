@@ -1,0 +1,85 @@
+# notification-worker: consumes orders.created events from JetStream and
+# records a notification for each. It serves no traffic, so it has no Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-worker
+  namespace: testbed
+  labels:
+    app: notification-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-worker
+  template:
+    metadata:
+      labels:
+        app: notification-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      containers:
+        - name: notification-worker
+          image: sre-testbed/services:dev
+          imagePullPolicy: Never
+          command: [/usr/local/bin/notification-worker]
+          env:
+            - name: NATS_URL
+              value: nats://nats.testbed.svc.cluster.local:4222
+            # Simulated latency of the notification provider. One worker
+            # handles events one at a time, so its ceiling is about
+            # 1 / SEND_DELAY = 40 events per second, against roughly 2 orders
+            # per second from the load generator.
+            - name: SEND_DELAY
+              value: 25ms
+            - name: DB_HOST
+              value: postgres.testbed.svc.cluster.local
+            - name: DB_NAME
+              value: shop
+            - name: DB_USER
+              value: shop
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            - name: DB_MAX_CONNS
+              value: "4"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4317
+            - name: GOMEMLIMIT
+              value: 80MiB
+          ports:
+            - name: ops
+              containerPort: 8081
+          # Liveness is deliberately slow to act: a restart only after a full
+          # minute without an answer (6 probes of 5 s). It exists to catch a
+          # hung process, not a slow one. With the defaults (1 s, 3 failures),
+          # a 20 s stall of the kubelet itself, seen when the host ran short
+          # of memory, restarted every healthy container at the same moment.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: ops
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: ops
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]

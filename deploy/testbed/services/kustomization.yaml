@@ -1,0 +1,9 @@
+# The four Go services. Applied after the data stores (see ../stores).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - inventory-service.yaml
+  - order-service.yaml
+  - notification-worker.yaml
+  - api-gateway.yaml
