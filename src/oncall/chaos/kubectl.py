@@ -5,6 +5,7 @@ shell in between, so nothing in an argument is ever interpreted: a value like
 `1ms; rm -rf /` would be passed to kubectl as that literal string.
 """
 
+import os
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -44,9 +45,19 @@ class Kubectl:
         if not self.kubeconfig.is_file():
             raise CommandError(f"{self.kubeconfig} not found; is the cluster up? (make up)")
         argv = ["kubectl", "--kubeconfig", str(self.kubeconfig), *args]
+        # `kubectl describe` prints times in the local time zone. Everything
+        # else the agent reads (the page, Prometheus, Loki, YAML output) is UTC,
+        # and a report should not depend on where the laptop is.
+        env = {**os.environ, "TZ": "UTC"}
         try:
             result = subprocess.run(
-                argv, input=stdin, capture_output=True, text=True, timeout=timeout, check=False
+                argv,
+                input=stdin,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                env=env,
             )
         except subprocess.TimeoutExpired as err:
             raise CommandError(f"kubectl {' '.join(args)} timed out after {timeout:g} s") from err

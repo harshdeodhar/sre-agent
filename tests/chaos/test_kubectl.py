@@ -46,6 +46,20 @@ def test_runs_an_argument_list_with_the_explicit_kubeconfig(
     assert recorder.kwargs["input"] == "{}"
 
 
+def test_kubectl_prints_times_in_utc(kubeconfig: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder()
+    monkeypatch.setattr(subprocess, "run", recorder)
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    monkeypatch.setenv("HOME", "/home/someone")
+
+    Kubectl(kubeconfig).run(["describe", "pod", "x"])
+
+    env = recorder.kwargs["env"]
+    assert isinstance(env, dict)
+    assert env["TZ"] == "UTC"
+    assert env["HOME"] == "/home/someone"  # the rest of the environment is passed on
+
+
 def test_non_zero_exit_raises_with_stderr(
     kubeconfig: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
