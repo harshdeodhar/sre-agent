@@ -1,0 +1,62 @@
+# Loki in single-binary mode: every component in one process, chunks and index
+# on the local filesystem. Fine for one node and a day of logs; not a
+# production layout.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+
+schema_config:
+  configs:
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  retention_period: 24h
+  # Logs arrive over OTLP. Loki turns a fixed set of resource attributes
+  # (service.name, k8s.namespace.name, k8s.pod.name, k8s.container.name, ...)
+  # into index labels and stores every other attribute, such as trace_id, as
+  # structured metadata next to the log line.
+  allow_structured_metadata: true
+  volume_enabled: true
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+# Small caches: the defaults assume a machine with memory to spare.
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 16
+chunk_store_config:
+  chunk_cache_config:
+    embedded_cache:
+      enabled: true
+      max_size_mb: 32
+
+# Never phone home.
+analytics:
+  reporting_enabled: false

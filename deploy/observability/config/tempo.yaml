@@ -1,0 +1,37 @@
+# Tempo in single-binary mode with local disk storage.
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          # The default binds to localhost, which nothing outside the pod
+          # could reach.
+          endpoint: 0.0.0.0:4317
+
+ingester:
+  # Cut traces and blocks quickly: a trace should be searchable seconds after
+  # the request finished, and small blocks keep memory low.
+  trace_idle_period: 5s
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 12h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+# Never phone home.
+usage_report:
+  reporting_enabled: false

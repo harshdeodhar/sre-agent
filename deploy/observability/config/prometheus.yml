@@ -1,0 +1,94 @@
+# Prometheus scrape configuration.
+#
+# Three sources of metrics:
+#   pods                every pod that opts in with the prometheus.io/scrape
+#                       annotation (the Go services, the exporter sidecars,
+#                       the load generator, the OTel Collector)
+#   kubelet-cadvisor    per-container CPU, memory and network usage
+#   kube-state-metrics  Kubernetes object state (restarts, replica counts,
+#                       why a container is waiting or was terminated)
+global:
+  # 10 s keeps short incidents visible and makes rate(...[1m]) well supported
+  # (six samples per window) at a series count this small.
+  scrape_interval: 10s
+  scrape_timeout: 5s
+
+scrape_configs:
+  - job_name: pods
+    kubernetes_sd_configs:
+      - role: pod
+        # Only these namespaces are ever discovered. Anything outside them
+        # cannot appear in Prometheus, whatever annotations it carries.
+        namespaces:
+          names: [testbed, loadgen, observability]
+    relabel_configs:
+      # Opt-in: scrape only pods annotated prometheus.io/scrape: "true".
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      # Finished pods have nothing to scrape.
+      - source_labels: [__meta_kubernetes_pod_phase]
+        action: drop
+        regex: Succeeded|Failed
+      # Scrape <pod IP>:<prometheus.io/port>. Service discovery yields one
+      # target per declared container port; rewriting them all to the annotated
+      # port makes them identical, and Prometheus collapses identical targets.
+      - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: (.+);(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      # job = the pod's "app" label, so queries read naturally:
+      # up{job="order-service"}.
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: job
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      # instance = pod name instead of IP:port; a pod name means something to a
+      # person reading a graph legend.
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: instance
+
+  - job_name: kubelet-cadvisor
+    # cAdvisor is built into the kubelet and reports resource usage for every
+    # container on the node. Scraped from the kubelet's own HTTPS port,
+    # authenticated with this pod's ServiceAccount token (RBAC: nodes/metrics).
+    scheme: https
+    metrics_path: /metrics/cadvisor
+    authorization:
+      credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    kubernetes_sd_configs:
+      - role: node
+    metric_relabel_configs:
+      # Keep the handful of series the dashboards and the agent use, and drop
+      # the rest of cAdvisor's (large) output before it is stored.
+      - source_labels: [__name__]
+        action: keep
+        regex: "container_cpu_usage_seconds_total|\
+          container_cpu_cfs_periods_total|\
+          container_cpu_cfs_throttled_periods_total|\
+          container_memory_working_set_bytes|\
+          container_memory_rss|\
+          container_spec_memory_limit_bytes|\
+          container_oom_events_total|\
+          container_network_receive_bytes_total|\
+          container_network_transmit_bytes_total|\
+          container_network_receive_packets_dropped_total|\
+          container_network_transmit_packets_dropped_total"
+      # Keep containers in our three namespaces, plus the root cgroup (id="/"),
+      # which is the whole node and answers "does this fit in the Docker VM?".
+      - source_labels: [namespace, id]
+        action: keep
+        regex: (testbed|loadgen|observability);.*|;/
+
+  - job_name: kube-state-metrics
+    # honor_labels: these metrics describe other objects, and carry those
+    # objects' own "namespace" and "pod" labels. Without this, Prometheus would
+    # rename them to exported_namespace / exported_pod.
+    honor_labels: true
+    static_configs:
+      - targets: [kube-state-metrics.observability.svc.cluster.local:8080]

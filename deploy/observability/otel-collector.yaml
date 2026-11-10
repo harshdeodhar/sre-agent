@@ -1,0 +1,91 @@
+# OpenTelemetry Collector, one per node (a DaemonSet), because it reads the
+# node's container log files. Configured by config/otel-collector.yaml.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app: otel-collector
+spec:
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8888"
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.133.0
+          args:
+            - --config=/etc/otel/otel-collector.yaml
+          env:
+            - name: GOMEMLIMIT
+              value: 160MiB
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: metrics
+              containerPort: 8888
+            - name: health
+              containerPort: 13133
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              memory: 200Mi
+          securityContext:
+            # Container log files on the node are readable by root only. The
+            # mount below is read-only and limited to the log directory.
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+              readOnly: true
+            - name: pod-logs
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: checkpoints
+              mountPath: /var/lib/otelcol
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+        - name: pod-logs
+          hostPath:
+            path: /var/log/pods
+        # On the node, not in the pod, so the read positions outlive the pod
+        # when the DaemonSet is rolled. "The node" is the k3d container, so
+        # this is deleted with the cluster.
+        - name: checkpoints
+          hostPath:
+            path: /var/lib/sre-testbed/otelcol
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: observability
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc

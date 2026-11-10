@@ -1,0 +1,45 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - prometheus.yaml
+  - kube-state-metrics.yaml
+  - loki.yaml
+  - tempo.yaml
+  - otel-collector.yaml
+  - grafana.yaml
+
+# Each config file becomes a ConfigMap whose name ends in a hash of its
+# content, and kustomize rewrites the references in the workloads above. A
+# config edit therefore changes the pod template and rolls the pod, which is
+# what makes `kubectl apply -k` enough to pick up a config change.
+configMapGenerator:
+  - name: prometheus-config
+    namespace: observability
+    files:
+      - config/prometheus.yml
+  - name: loki-config
+    namespace: observability
+    files:
+      - config/loki.yaml
+  - name: tempo-config
+    namespace: observability
+    files:
+      - config/tempo.yaml
+  - name: otel-collector-config
+    namespace: observability
+    files:
+      - config/otel-collector.yaml
+  - name: grafana-datasources
+    namespace: observability
+    files:
+      - datasources.yaml=config/grafana-datasources.yaml
+  - name: grafana-dashboard-provider
+    namespace: observability
+    files:
+      - provider.yaml=config/grafana-dashboards.yaml
+  - name: grafana-dashboards
+    namespace: observability
+    files:
+      - dashboards/testbed-overview.json

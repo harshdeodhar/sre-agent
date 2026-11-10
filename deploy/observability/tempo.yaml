@@ -1,0 +1,96 @@
+# Tempo: trace storage and query (TraceQL). Receives spans from the OTel
+# Collector over OTLP/gRPC.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: observability
+  labels:
+    app: tempo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tempo
+  template:
+    metadata:
+      labels:
+        app: tempo
+    spec:
+      securityContext:
+        fsGroup: 10001 # the image's "tempo" user
+      containers:
+        - name: tempo
+          image: grafana/tempo:2.8.2
+          args:
+            - -config.file=/etc/tempo/tempo.yaml
+          env:
+            # Tell the Go runtime where the ceiling is. Without it the garbage
+            # collector lets the heap grow to twice the live data before
+            # collecting, with no idea a 384Mi limit exists.
+            - name: GOMEMLIMIT
+              value: 320MiB
+          ports:
+            - name: http
+              containerPort: 3200
+            - name: otlp-grpc
+              containerPort: 4317
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              memory: 384Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+              readOnly: true
+            - name: data
+              mountPath: /var/tempo
+      volumes:
+        - name: config
+          configMap:
+            name: tempo-config
+        - name: data
+          emptyDir: {}
+---
+# In-cluster access: query API and OTLP ingest.
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: observability
+spec:
+  selector:
+    app: tempo
+  ports:
+    - name: http
+      port: 3200
+      targetPort: http
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+---
+# Query API on localhost:3200 via the k3d port mapping. A separate Service so
+# that only the query port is exposed on the node, not OTLP ingest.
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo-external
+  namespace: observability
+spec:
+  type: NodePort
+  selector:
+    app: tempo
+  ports:
+    - name: http
+      port: 3200
+      targetPort: http
+      nodePort: 30200

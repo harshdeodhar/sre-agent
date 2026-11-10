@@ -1,0 +1,12 @@
+# Tells Grafana to load every dashboard JSON file in the mounted directory.
+apiVersion: 1
+
+providers:
+  - name: sre-testbed
+    folder: SRE Testbed
+    type: file
+    # Dashboards are owned by the files in deploy/observability/dashboards.
+    # Edits made in the UI are for experimenting and are not saved back.
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

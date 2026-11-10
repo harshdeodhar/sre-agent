@@ -1,0 +1,49 @@
+# Grafana data sources, provisioned from this file at startup. The fixed uids
+# are what dashboards and the cross-links below refer to.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus.observability.svc.cluster.local:9090
+    isDefault: true
+    jsonData:
+      # Match the scrape interval so Grafana picks sensible rate() windows.
+      timeInterval: 10s
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki.observability.svc.cluster.local:3100
+    jsonData:
+      # Log line -> trace: every log record written inside a request carries
+      # trace_id (as structured metadata). Turn it into a link to Tempo.
+      derivedFields:
+        - name: trace
+          matcherType: label
+          matcherRegex: trace_id
+          url: "$${__value.raw}"
+          datasourceUid: tempo
+          urlDisplayLabel: View trace
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo.observability.svc.cluster.local:3200
+    jsonData:
+      # Span -> logs: open the logs of the span's service, filtered to the
+      # trace ID, for a window around the span.
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: -1m
+        spanEndTimeShift: 1m
+        filterByTraceID: true
+        tags:
+          - key: service.name
+            value: service_name
+      nodeGraph:
+        enabled: true

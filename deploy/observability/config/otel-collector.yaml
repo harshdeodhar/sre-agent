@@ -1,0 +1,135 @@
+# OpenTelemetry Collector: the one agent that moves telemetry off the node.
+#
+#   traces: services --OTLP/gRPC--> collector --> Tempo
+#   logs:   container log files on the node ----> collector --> Loki
+#
+# Metrics do not pass through here; Prometheus scrapes them directly.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+  filelog:
+    # Kubernetes writes each container's stdout/stderr to
+    # /var/log/pods/<namespace>_<pod>_<uid>/<container>/<restart>.log.
+    # Only the testbed namespace is read. Logs from any other namespace never
+    # reach Loki, so they cannot leak hints about how an incident was set up.
+    include:
+      - /var/log/pods/testbed_*/*/*.log
+    include_file_path: true
+    # Read files from the top: a container's startup lines matter, and they
+    # are written before the collector has noticed the new file.
+    start_at: beginning
+    # Remember how far each file has been read (see file_storage below), so a
+    # restarted collector carries on where it stopped. Without this it re-reads
+    # every file from the top, which was measured to push it into its memory
+    # limiter and drop log records.
+    storage: file_storage/checkpoints
+    # When the pipeline pushes back (memory limiter, Loki down), wait and
+    # retry instead of dropping what was read. The files are the buffer.
+    retry_on_failure:
+      enabled: true
+    operators:
+      # Parses the container runtime's line format (timestamp, stream, text)
+      # and takes k8s.namespace.name, k8s.pod.name and k8s.container.name from
+      # the file path.
+      - type: container
+      # The Go services log JSON. Lift level, trace_id and span_id out of the
+      # line so the log record carries a real severity and trace link. Lines
+      # that are not JSON (Postgres, Redis, NATS) skip this step.
+      - type: json_parser
+        if: 'body matches "^\\{"'
+        parse_from: body
+        parse_to: attributes
+        on_error: send_quiet
+        severity:
+          parse_from: attributes.level
+        trace:
+          trace_id:
+            parse_from: attributes.trace_id
+          span_id:
+            parse_from: attributes.span_id
+      # The body still holds the full original line, so drop the parsed copy
+      # of its fields rather than storing everything twice.
+      - type: retain
+        fields:
+          - attributes["log.iostream"]
+
+processors:
+  # Back-pressure before the container's memory limit is reached, instead of
+  # being OOM-killed.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 120
+    spike_limit_mib: 30
+
+  # Log files carry no service.name. Use the container name, which for the Go
+  # services equals the service.name they put on their traces, so logs and
+  # traces can be joined on it.
+  resource/service-name:
+    attributes:
+      - key: service.name
+        from_attribute: k8s.container.name
+        action: insert
+
+  # Loki files every line under a "detected_level". For a record that arrives
+  # with a severity it copies the text as written, and Go's slog writes
+  # "ERROR", whereas Loki's own detection on plain-text lines (Postgres, the
+  # exporters) yields "error". Lower-casing here gives one spelling across all
+  # containers, so one filter (detected_level="error") covers the namespace.
+  transform/severity:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(severity_text, ConvertCase(severity_text, "lower")) where severity_text != ""
+
+  batch:
+    timeout: 2s
+    # Cap the batch as well as the wait. Uncapped, a backlog of log lines went
+    # to Loki as single requests of over 4 MB, which is its per-second
+    # ingestion limit, so every one of them was rejected.
+    send_batch_size: 1000
+    send_batch_max_size: 1000
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo.observability.svc.cluster.local:4317
+    tls:
+      insecure: true # in-cluster, plain gRPC
+
+  otlphttp/loki:
+    endpoint: http://loki.observability.svc.cluster.local:3100/otlp
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  # Read positions of the log files, kept in a small database on the node.
+  file_storage/checkpoints:
+    directory: /var/lib/otelcol
+
+service:
+  extensions: [health_check, file_storage/checkpoints]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]
+    logs:
+      receivers: [filelog]
+      processors: [memory_limiter, resource/service-name, transform/severity, batch]
+      exporters: [otlphttp/loki]
+  telemetry:
+    logs:
+      level: warn
+    # The collector's own metrics (spans and log records accepted, refused,
+    # failed to export), scraped by Prometheus.
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888

@@ -1,0 +1,8 @@
+# Everything that runs in the cluster: `kubectl apply -k deploy`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - observability
+  - testbed
+  - loadgen
