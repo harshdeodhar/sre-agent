@@ -19,6 +19,7 @@ configMapGenerator:
     namespace: observability
     files:
       - config/prometheus.yml
+      - config/alerts.yml
   - name: loki-config
     namespace: observability
     files:

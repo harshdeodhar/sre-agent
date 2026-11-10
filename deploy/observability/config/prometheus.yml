@@ -12,6 +12,12 @@ global:
   # (six samples per window) at a series count this small.
   scrape_interval: 10s
   scrape_timeout: 5s
+  # Alert rules are evaluated as often as their inputs change.
+  evaluation_interval: 10s
+
+# Symptom alerts. Mounted from the same ConfigMap as this file.
+rule_files:
+  - /etc/prometheus/alerts.yml
 
 scrape_configs:
   - job_name: pods

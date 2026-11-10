@@ -1,0 +1,99 @@
+# Alert rules, evaluated by Prometheus itself. There is no Alertmanager: the
+# harness reads the state of these rules from Prometheus's API, and a firing
+# alert is the page the agent starts from.
+#
+# Every rule describes a SYMPTOM, the way an on-call rota's alerts do: what a
+# user or an operator would notice. None of them names a cause. Which fault is
+# behind "the error rate is high" is exactly what the agent has to work out.
+#
+# Thresholds are set against the measured healthy baseline, noted on each rule
+# (quiet host, default load of 10 requests per second).
+groups:
+  - name: testbed-symptoms
+    rules:
+      # Baseline: 0% on a quiet host.
+      - alert: GatewayErrorRateHigh
+        expr: |
+          sum by (route) (rate(http_server_requests_total{job="api-gateway", code=~"5.."}[2m]))
+            /
+          sum by (route) (rate(http_server_requests_total{job="api-gateway"}[2m]))
+            > 0.05
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: 'More than 5% of requests to {{ $labels.route }} are failing with a 5xx status.'
+
+      # Baseline: p99 of 25 to 160 ms per route.
+      - alert: GatewayLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum by (route, le) (rate(http_server_request_duration_seconds_bucket{job="api-gateway"}[2m]))
+          ) > 1
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: 'The 99th percentile latency of {{ $labels.route }} is above 1 second.'
+
+      # Baseline: no restarts. Two within five minutes is a crash loop, not a
+      # one-off.
+      - alert: ContainerRestartingRepeatedly
+        expr: increase(kube_pod_container_status_restarts_total{namespace="testbed"}[5m]) >= 2
+        labels:
+          severity: page
+        annotations:
+          summary: 'Container {{ $labels.container }} in pod {{ $labels.pod }} has restarted at least twice in 5 minutes.'
+
+      # Baseline: 0. A healthy rollout of one of these services finishes in
+      # well under two minutes.
+      - alert: DeploymentReplicasUnavailable
+        expr: kube_deployment_status_replicas_unavailable{namespace="testbed"} > 0
+        for: 2m
+        labels:
+          severity: ticket
+        annotations:
+          summary: 'Deployment {{ $labels.deployment }} has had unavailable replicas for 2 minutes.'
+
+      # Baseline: 0 pending. Orders arrive at about 2 per second, so 100
+      # pending means notifications are roughly a minute behind.
+      - alert: ConsumerLagHigh
+        expr: jetstream_consumer_num_pending{namespace="testbed"} > 100
+        for: 1m
+        labels:
+          severity: ticket
+        annotations:
+          summary: 'Consumer {{ $labels.consumer_name }} on stream {{ $labels.stream_name }} has more than 100 messages pending.'
+
+      # Baseline: about 60% of stock lookups are served from the cache.
+      - alert: CacheHitRatioLow
+        expr: |
+          sum(rate(inventory_cache_requests_total{result="hit"}[2m]))
+            /
+          sum(rate(inventory_cache_requests_total[2m]))
+            < 0.2
+        for: 2m
+        labels:
+          severity: ticket
+        annotations:
+          summary: 'Fewer than 20% of inventory stock lookups are served from the cache.'
+
+      # Baseline: every statement's median stayed below 10 ms outside incidents
+      # (results/phase2-incidents/calibration). 25 ms is a bucket boundary of
+      # the histogram, so the comparison is exact rather than interpolated.
+      # The first threshold was 50 ms; a table scan of orders takes 42 to 58 ms
+      # here, so the rule sat on the signal and never fired. See the README in
+      # that directory.
+      # The median, not a high percentile: this fires when the typical
+      # execution is slow, and stays quiet through the occasional slow one.
+      # stock.restock is a periodic batch statement, not on a request path.
+      - alert: DatabaseQuerySlow
+        expr: |
+          histogram_quantile(0.5,
+            sum by (job, query, le) (rate(db_query_duration_seconds_bucket{query!="stock.restock"}[2m]))
+          ) > 0.025
+        for: 2m
+        labels:
+          severity: ticket
+        annotations:
+          summary: 'The median duration of database statement {{ $labels.query }} from {{ $labels.job }} is above 25 ms.'
