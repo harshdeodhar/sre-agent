@@ -1,9 +1,10 @@
 # Architecture
 
-> **Status: Phase 1 built** (testbed, observability, load generator). The
-> incident library, agent and harness sections are still design. Each section is
-> updated when its phase lands, and anything marked "to verify" is an assumption
-> that a later phase must confirm by running it.
+> **Status: Phases 1 to 3 built** (testbed, observability, load generator; the
+> first 8 incidents with inject and cleanup; the agent in `observe` mode). The
+> write tools, the guardrail gate and the evaluation harness are still design.
+> Each section is updated when its phase lands, and anything marked "to verify"
+> is an assumption that a later phase must confirm by running it.
 
 ## What this is
 
@@ -229,6 +230,20 @@ and not a guarantee, as Tempo shows below.
   either run above. *To do in Phase 5:* the harness records restart counts,
   scrape gaps and baseline error rate around each incident and discards, rather
   than scores, a run where the platform itself misbehaved.
+- *An overload outlasts its trigger.* Seen in Phase 3
+  ([data](../results/phase3-agent/cluster-health.json)): with no incident
+  injected, the cluster was healthy at 18:30 UTC, became overloaded at about
+  18:48 while a dependency install and a lint run were using the Mac's memory,
+  and stayed that way for about 50 minutes after those had finished: gateway
+  p95 between 0.8 and 3.9 s, 1% to 48% errors, 4 to 13 alerts firing, and at
+  one point an API server that did not answer. The load generator was paused
+  from 19:24 to 19:28; the overload came back for eight minutes when traffic
+  returned and cleared at 19:38. Whether the pause helped is not established.
+  It returned at 20:11 after a burst of commands on the host, with nothing
+  injected, and cleared by itself at 20:22. The agent runs in
+  `results/phase3-agent/` were made in the healthy window in between, each
+  after `make healthy` passed. *For Phase 5:* the harness must refuse to inject
+  into an unhealthy cluster, and a full benchmark needs the browser closed.
 - *Tempo is the tightest fit.* It stores very little data at this load, but
   writing and compacting its Parquet blocks allocates memory in bursts: those
   two code paths made 72% of all allocations in a heap profile of the first
@@ -385,32 +400,90 @@ things from those runs matter for later phases:
 
 ## Agent
 
+> **Built in Phase 3:** the loop, the read-only tools, the report, the trace and
+> its replay, all in `observe` mode. **Still design (Phase 4):** the write tools,
+> the guardrail gate and the `propose` and `auto` modes.
+
+| Module (`src/oncall/agent/`) | What it holds |
+|---|---|
+| `loop.py` | The tool-use loop, its limits, and every way a run can end |
+| `llm.py` | The only code that talks to the Anthropic API |
+| `prompt.py`, `page.py` | What the model is told: the system prompt, and the alert that paged it |
+| `tools/` | The read-only tools, one file per backend |
+| `report.py` | The `submit_report` schema, the checks on a submission, the Markdown rendering |
+| `trace.py`, `replay.py` | The JSONL trace, and running the loop again from one |
+| `pricing.py` | The price table and the cost of a request |
+| `identity.py` | The read-only kubeconfig the tools run with |
+| `runner.py`, `cli.py` | One investigation from page to files; the command line |
+
 **Loop.** A hand-written tool-use loop over the Anthropic Messages API (official
 Python SDK). Hand-written rather than the SDK's tool runner because the loop is
-where caps, tracing, and the write gate live, and those need to be code I can
-point at and test. The conversation history is append-only.
+where limits, tracing, and (from Phase 4) the write gate live, and those need to
+be code I can point at and test. Each turn sends the whole conversation; the
+reply is appended exactly as it arrived (thinking blocks included), the tools it
+asked for are run, and their results go back as one user message. Nothing in
+the conversation is ever edited, which is what lets the API cache the prefix.
+The stop reason is checked before anything in a reply is acted on: tool calls in
+a reply that was refused or cut off at the output limit are not run.
 
-**Trigger.** The agent starts from an alert payload containing only a symptom
-(for example "5xx rate on api-gateway above 5% for 2 minutes"), the way a human
-on-call would.
+**What the model is told.** Two things, and nothing about any incident:
+
+- *The system prompt*: how the testbed is built, where its telemetry is, how to
+  investigate, and how to express a root cause. The fault categories and the
+  rules for choosing a (component, category) pair are the rubric's own text
+  ([`RUBRIC.md`](RUBRIC.md) says they apply "to incident authors and to the agent
+  alike"), generated from the same Python table and checked against the document
+  by a test. The prompt is the same for every incident and every model, and
+  byte-identical between runs so that it is cached.
+- *The page* (the first user message): the alerts that are firing in Prometheus
+  when the run starts, each with its name, severity, summary, labels, the time
+  its condition became true, and the rule's expression. All seven alert rules
+  describe symptoms ("p99 above 1 s"), never causes.
 
 **Tools take typed parameters, never commands.** The model cannot pass a shell
-string or a raw `kubectl` line. Each tool has a JSON schema with enumerated
-verbs and resource kinds; code builds the argument list and runs it without a
-shell.
+string or a raw `kubectl` line. Each tool has a strict JSON schema; the same
+pydantic model then validates the values (ranges, name patterns), and code
+builds the argument list and runs it without a shell. The namespace is not a
+parameter: it is always `testbed`. Resource kinds are a closed list without
+Secrets.
 
-| Read-only | Write (gated) |
+| Read-only (built) | Write (Phase 4, gated) |
 |---|---|
-| `query_metrics` (PromQL) | `rollback_deployment` |
+| `query_metrics` (PromQL, instant or range), `list_metrics` | `rollback_deployment` |
 | `search_logs` (LogQL) | `scale_deployment` |
-| `get_trace` / `search_traces` | `restart_pod` |
+| `search_traces` (TraceQL), `get_trace` | `restart_pod` |
 | `kube_get`, `kube_describe`, `kube_events` | `revert_config` |
 | `deploy_history` | |
 
-Tool output is bounded. When a result is cut, the agent is told how much was
-omitted so it can narrow the query; nothing is dropped silently.
+`list_metrics` (metric names matching a pattern) was added to the original list
+so the model looks names up instead of guessing them. There is no tool for pod
+logs through the Kubernetes API: logs come from Loki, like everything else.
 
-**Guardrails are enforced twice.**
+Tool output is bounded (6,000 characters). When a result is cut, the agent is
+told how much was omitted so it can narrow the query; nothing is dropped
+silently. A tool failure (a PromQL syntax error, an unreachable backend) is
+returned to the model as an error result, not raised.
+
+**Limits.** Every run is bounded, and every way a run can end is a named
+outcome in the trace and the report.
+
+| Limit | Default | When reached |
+|---|---|---|
+| Tool calls | 30 | Soft: further tool calls are refused with the reason, and counted; `submit_report` still works |
+| Wall clock | 600 s | Soft, as above |
+| Conversation size | 90,000 prompt tokens | Soft, as above. Claude Haiku 5.5 costs five times as much per token above 100,000 |
+| Model requests | 45 | Hard: the run ends |
+| Cost | $0.50 | Hard: the run ends |
+| Rejected reports | 3 | Hard: the run ends without a report |
+| Replies without a tool call | 2 nudges | Hard: the run ends on the third |
+
+Outcomes: `report`, `report_rejected`, `no_tool_call`, `max_tokens`, `refusal`,
+`context_window_exceeded`, `unexpected_stop_reason`, `request_limit`,
+`cost_limit`, `model_error`. Only the first produces a report to score; the
+benchmark will count the others as failures, not drop them.
+
+**Guardrails are enforced twice.** (Phase 4 design; the read-only identity
+below is built.)
 
 *In code*, every write request passes through one function, in this order. Any
 step can reject, and every rejection is recorded and counted in the benchmark:
@@ -426,23 +499,91 @@ step can reject, and every rejection is recorded and counted in the benchmark:
 6. Server-side dry run and diff, saved to the trace before anything executes.
 7. Execute, then re-read the resource to confirm the change applied.
 
-*In Kubernetes*, the agent uses its own ServiceAccount. Its Role exists only in
-`testbed`, grants read verbs plus the few write verbs the tools need, and
-excludes Secrets. `observe` mode uses a read-only identity. If the code gate had
-a bug, the API server would still refuse.
+*In Kubernetes*, the agent uses its own ServiceAccount, never the
+administrator's kubeconfig. If the code had a bug, the API server would still
+refuse.
 
-**Output.** The agent finishes by calling a `submit_report` tool whose strict
-schema is the incident report: timeline, evidence, root-cause hypothesis
-(component, fault category, free-text explanation, confidence), actions taken or
-proposed, and recovery verification. Every evidence item must cite the ID of a
-tool call from the run; code rejects citations to calls that never happened. The
-report is written as JSON and rendered to Markdown.
+- Built: `oncall-agent-observer` ([`deploy/rbac/`](../deploy/rbac/agent-observer.yaml)).
+  Its Role exists only in `testbed` and grants `get` and `list` on pods,
+  services, endpoints, endpoint slices, configmaps, events, deployments and
+  replicasets. No write verb, no Secrets, no `pods/log`, no `pods/exec`, no
+  `watch`, no other namespace, nothing cluster-scoped. Before each run the CLI
+  mints a one-hour token for it (`kubectl create token`, with the admin
+  kubeconfig) and writes `agent-observer.kubeconfig` with mode 0600; the tools
+  are given only that file. RBAC objects cost no memory.
+- Phase 4: a second identity with the few write verbs the write tools need,
+  used only in `propose` and `auto` modes.
 
-**Trace.** Every model request, response, tool call, tool result, and guardrail
-decision is appended to a JSONL file under `runs/`. The API key is never written
-there or to logs. A recorded trace can be replayed through the loop without
-calling the API, which is how the loop is unit-tested and how CI runs with no
-key.
+**Output.** The agent finishes by calling `submit_report`, whose strict schema is
+the report: summary, root causes (component, fault category, explanation,
+confidence), evidence, timeline, and recommended actions. Component and category
+come from the same closed lists as the benchmark's ground truth, so scoring
+needs no reading of free text. Code then applies what a schema cannot express:
+
+- Every tool result starts with a call ID (`[call c7 | 7 of 30 tool calls
+  used]`), and every evidence item must cite one. A citation of an ID that is
+  not at the top of a result the model has received is rejected. That includes
+  a call made in the same reply as the report: its ID can be guessed, its
+  result has not been read.
+- A root cause needs at least one piece of evidence, and may be listed once.
+- An empty list of causes is accepted: an agent that found nothing can say so
+  (and will score as a miss) instead of being forced to guess.
+- No text field may contain `<parameter name=`, the start of a parameter in
+  the model's own tool-call syntax. This rule exists because of the first live
+  run: the model wrote its whole root-cause list into the `summary` text and
+  left the `root_causes` field empty. The call fitted the strict schema, so a
+  correct diagnosis was filed as "no root cause"
+  ([`results/phase3-agent/`](../results/phase3-agent/README.md)). A strict
+  schema guarantees the shape of a call, not that each answer is in its field.
+
+A rejected report is returned to the model with the reasons, recorded, and
+counted. The report is written as `report.json` (the page, the submission, the
+cited calls with their parameters, and run statistics filled in by code) and
+rendered to `report.md` from that file alone.
+
+What the code does not check: that a finding follows from the call it cites.
+A citation proves the call was made and its result was shown to the model,
+nothing more.
+
+**Trace.** `trace.jsonl`, one JSON object per line, flushed as it is written.
+It holds the system prompt and tool definitions (once), every model response
+exactly as the API returned it, every tool call with its parameters, result and
+duration, every refusal, nudge and rejected report, and how the run ended. Each
+request record carries a SHA-256 of the conversation that was sent. The API key
+and the cluster token are never passed to the trace; as a tripwire, the writer
+is told both values and refuses to write a line that contains either.
+
+**Replay.** `make agent-replay TRACE=<file>` runs the same loop code against a
+trace: the recorded responses stand in for the model, the recorded results for
+the tools, the recorded readings for the clock. The replay rebuilds the
+conversation turn by turn and compares its hash with the recorded one, so a
+change in the loop's behaviour is detected, not assumed away. This is how the
+loop is tested against a real model's behaviour with no API key (the unit tests
+replay the traces in `results/phase3-agent/`), and how anyone can re-derive a
+committed report from its trace.
+
+**Cost.** Computed per request from the usage the API reports and a checked-in
+price table ([`pricing.py`](../src/oncall/agent/pricing.py)) that records its
+source URL and retrieval date. A model with no entry cannot be run. Requests use
+prompt caching: one breakpoint after the system prompt (tools and prompt never
+change), one moving breakpoint at the end of the conversation.
+
+**Confirmed by the first live runs** (`claude-haiku-5-5`, 2026-11-10; traces in
+[`results/phase3-agent/`](../results/phase3-agent/README.md)):
+
+- The API accepts the request as built: strict tool schemas, adaptive thinking
+  with a summarised display, `output_config.effort`, no `tool_choice`, no
+  sampling parameters, and response content passed back unchanged.
+- Caching works as designed. Tools and system prompt are about 6,000 tokens,
+  written once and read on every later request, including the first request of
+  a run that starts within five minutes of another. Uncached input was 2 to 4
+  tokens per request.
+- Measured cost: $0.0039 to $0.0072 per investigation (7 to 15 tool calls, 18
+  to 37 seconds). Four runs is not a basis for a benchmark projection; Phase 5
+  measures per-incident cost again before any full run.
+- Not yet exercised by a live model: a rejected report, a refused tool call,
+  the nudge, and every outcome other than `report`. Those paths are covered by
+  unit tests with scripted replies only.
 
 ## Evaluation harness
 
@@ -480,7 +621,7 @@ estimate, and the report will say so.
 ```
 .
 ├── Makefile                 # up, down, verify, test, lint, inject, cleanup,
-│                            # incident-check; later bench
+│                            # incident-check, agent, agent-replay; later bench
 ├── CLAUDE.md                # conventions for AI-assisted work on this repo
 ├── .env.example
 ├── pyproject.toml           # the Python package `oncall` and its tool config
@@ -499,11 +640,13 @@ estimate, and the report will say so.
 │   ├── loadgen/
 │   ├── observability/       # Prometheus, Loki, Tempo, collector, Grafana,
 │   │                        # kube-state-metrics; config/ and dashboards/
-│   ├── rbac/                # (Phase 3) agent ServiceAccounts and Roles
+│   ├── rbac/                # the agent's read-only ServiceAccount and Role;
+│   │                        # (Phase 4) the write identity
 │   └── chaos/               # netem helper: manifest, image, script
 ├── incidents/               # one YAML per incident + JSON schema
 ├── src/oncall/              # Python package
-│   ├── agent/               # loop, llm client, tools/, guardrails/, report, trace
+│   ├── agent/               # loop, llm client, tools/, report, trace, replay;
+│   │                        # (Phase 4) guardrails/
 │   ├── chaos/               # incident parsing, inject, cleanup, health,
 │   │                        # incident-check
 │   └── bench/               # harness, scoring, report generation, router
