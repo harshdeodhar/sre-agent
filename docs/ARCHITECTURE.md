@@ -138,7 +138,7 @@ agent can touch. It is the customer, not part of the system being operated.
 
 | Signal | Component | Notes |
 |---|---|---|
-| Metrics | Prometheus, kube-state-metrics, kubelet cAdvisor, exporter sidecars for Postgres, Redis and NATS | Plain Prometheus, 10 s scrape, 12 h retention. No Alertmanager: alert rules will be evaluated by Prometheus and read from its API (rules arrive with the incidents in Phase 2). |
+| Metrics | Prometheus, kube-state-metrics, kubelet cAdvisor, exporter sidecars for Postgres, Redis and NATS | Plain Prometheus, 10 s scrape, 12 h retention. No Alertmanager: Prometheus evaluates the alert rules in `deploy/observability/config/alerts.yml` every 10 s and the harness reads their state from its API. |
 | Logs | Loki (single binary) | Filesystem storage, 24 h retention. |
 | Traces | Tempo (single binary) | Local disk, 12 h retention. Chosen over Jaeger because Grafana links traces to logs natively. |
 | Collection | One OTel Collector (DaemonSet) | Tails container log files to Loki and receives OTLP traces for Tempo. Metrics do not pass through it. |
@@ -198,7 +198,8 @@ the peaks as "under stress", not as a quiet-host baseline. Raw data:
 | redis-exporter | 1 | 16 | 64 | 18 |
 | postgres-exporter | 1 | 24 | 64 | 15 |
 | redis | 1 | 32 | 128 | 15 |
-| **Total across replicas** | | **1096** | **3112** | |
+| netem-helper (namespace `chaos`) | 1 | 8 | 32 | added in Phase 2, after this measurement |
+| **Total across replicas** | | **1104** | **3144** | |
 
 The whole node, k3s included, peaked at a 2500 MiB working set inside the
 4 GB Docker VM.
@@ -238,16 +239,31 @@ and not a guarantee, as Tempo shows below.
   it did not lower the peak. *Open:* re-measure on a quiet host before deciding
   between a higher limit and a different setting.
 - *OOM kills do not show in cAdvisor's counter.* `container_oom_events_total`
-  stayed at zero although Tempo was OOM-killed. *To verify in Phase 2:* detect
-  OOM kills in `testbed` from kube-state-metrics' last-terminated reason
-  instead.
+  stayed at zero although Tempo was OOM-killed. Verified in Phase 2: it also
+  stayed at zero while the inventory service was OOM-killed eight times. The
+  signal that works is kube-state-metrics'
+  `kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}`,
+  together with the restart counter; `kubectl describe pod` shows the same
+  thing as `Last State: Terminated, Reason: OOMKilled, Exit Code: 137`
+  ([data](../results/phase2-incidents/calibration/memory_limit_probe.json)).
 
 ## Incident library
 
-Each incident is one YAML file: `id`, `description`, `inject` steps, `cleanup`
-steps, `ground_truth` (one or more causes, each a component plus a fault
-category), `affected_services`, `detection` (the alert expected to fire), and
-`acceptable_remediations`.
+Each incident is one YAML file in `incidents/`, named after its `id`. The
+format is defined by pydantic models
+([`src/oncall/chaos/incident.py`](../src/oncall/chaos/incident.py)); the JSON
+schema generated from them is checked in as `incidents/schema.json`, and a test
+fails if the two drift apart.
+
+| Field | Meaning |
+|---|---|
+| `id`, `title`, `description` | For people. The description says what a user or operator would experience. |
+| `scenarios` | Symptom classes from the project brief (crash loop, consumer lag, ...), used only to report coverage. |
+| `inject`, `cleanup` | Lists of typed steps, see below. |
+| `ground_truth.causes` | One or more (component, fault category) pairs from a closed vocabulary. See [`RUBRIC.md`](RUBRIC.md). |
+| `affected_services` | Components whose behaviour degrades. |
+| `detection` | The alerts expected to fire (the first is the page the agent starts from), a deadline, and evidence queries. |
+| `acceptable_remediations` | Write actions that fix it, or `manual` when none of the agent's tools can. |
 
 Design rules:
 
@@ -258,18 +274,114 @@ Design rules:
 2. **No tell-tale names.** No env var, label, annotation, log line, or metric
    may name the fault. `FAULT_LEAK=true` would turn diagnosis into string
    matching. Config that enables a buggy path looks like an ordinary setting.
+   Steps cannot set labels or annotations at all, and the parser rejects
+   environment variable names containing words such as `FAULT` or `CHAOS`.
 3. **Config changes are real rollouts.** Service config lives in the Deployment
    spec, so a bad config push creates a new ReplicaSet revision. That makes
    "recent deploy history" and "rollback" the genuine Kubernetes operations.
    Faults injected elsewhere (database, Redis, network) leave no entry in
    deploy history, which is also realistic.
-4. **Cleanup is verified, not assumed.** After cleanup the harness checks the
-   same health conditions it uses for recovery scoring. An incident that does
-   not return the cluster to healthy is a bug in the incident.
+4. **Cleanup is verified, not assumed.** See "Proving an incident works" below.
+   An incident that does not return the cluster to healthy is a bug in the
+   incident.
 
-Network faults use `tc netem` applied to a pod's network namespace by a helper
-in the `chaos` namespace. *To verify in Phase 2:* that Docker Desktop's Linux
-kernel ships the `sch_netem` module. Fallback is a proxy-based injector.
+**Steps are a closed list of typed actions, not shell.** An incident file can
+only say things like "set this environment variable on this Deployment"; code
+turns that into a `kubectl` argument list and runs it without a shell
+([`steps.py`](../src/oncall/chaos/steps.py)). A typo is a validation error
+instead of a command that does something else, and reviewing an incident does
+not require reading shell.
+
+| Inject step | What it does |
+|---|---|
+| `set_env` | Change environment variables of a service (a rollout). |
+| `set_resources` | Change a service container's CPU or memory requests and limits (a rollout). |
+| `scale` | Change a service's replica count. |
+| `postgres_sql` | Run one SQL statement with `psql` inside the Postgres pod. |
+| `redis_command` | Run one Redis command with `redis-cli` inside the Redis pod. |
+| `netem` | Delay or drop packets leaving one or all pods of a service. |
+
+**Cleanup states the end state instead of undoing steps.** The cleanup step for
+anything done to a Deployment is `restore_deployment`: replace the live object
+with the one rendered from `deploy/`. It is therefore also correct after the
+agent has rolled back, scaled or restarted things in between, and harmless to
+run twice. Two details:
+
+- It uses `kubectl replace`, not `apply`. Apply merges, so it would restore a
+  changed value but leave behind a field that an incident (or the agent)
+  added, such as a CPU limit.
+- It then deletes the ReplicaSets left at zero replicas. Otherwise the faulty
+  revision of one incident would still be in the rollout history during the
+  next: a red herring at best and a hint at worst. One revision remains, the
+  good one, which is also what a rollback in the next incident returns to.
+
+The other cleanup steps are `clear_netem`, `postgres_sql` and `redis_command`.
+The data stores have no `restore_deployment`: their data is on `emptyDir`, and
+recreating their pods would wipe it.
+
+**Network faults** use Linux `tc netem` on the `eth0` of a target pod, applied
+from outside the pod by a helper in the `chaos` namespace
+([`deploy/chaos/`](../deploy/chaos/)). The helper is a pod that sleeps (request
+8 MiB, limit 32 MiB) and shares the node's PID namespace; the injector
+`kubectl exec`s a small script in it that finds a process of the target pod by
+the pod UID in its cgroup path, enters that process's network namespace with
+`nsenter`, and runs `tc`. Nothing about the target pod's spec, status or events
+changes, which is what makes the fault realistic to diagnose. The helper is the
+one privileged workload in the cluster; that is acceptable only because the
+cluster is a throwaway on a laptop. Docker Desktop's kernel
+(6.10.14-linuxkit) has `sch_netem` built in; the k3s node image has no `tc`
+binary, which is why the helper has its own image (Alpine plus `iproute2-tc`).
+
+**Alert rules are symptoms.** The seven rules in `alerts.yml` describe what a
+user or operator would notice (error rate, latency, restarts, unavailable
+replicas, consumer lag, cache hit ratio, slow statements) and never a cause.
+Each threshold is set against a measured healthy baseline, noted next to the
+rule. One was wrong at first: `DatabaseQuerySlow` asked for a median above
+50 ms, a table scan of `orders` takes 42 to 58 ms here, and the alert never
+fired. It is now 25 ms, against a baseline below 10 ms. A threshold may be
+moved like this when the testbed's own signal shows it is misplaced; it may not
+be moved to make an incident easier or harder for the agent.
+
+**"Healthy" is defined once** ([`health.py`](../src/oncall/chaos/health.py)):
+every Deployment in `testbed` has the replica count its manifest asks for, with
+all replicas updated and available, and no alert is pending or firing. Because
+latency spikes come and go on this machine, a single clean reading is not
+enough: the state has to hold for a stretch (60 s before an injection, 30 s
+after a cleanup).
+
+### Proving an incident works
+
+`make incident-check INCIDENT=<id>` ([`check.py`](../src/oncall/chaos/check.py))
+runs one incident against the live cluster with no agent involved:
+
+1. Wait until the cluster has been healthy for 60 s. If that does not happen
+   within 10 minutes, or if one of the incident's evidence queries already
+   returns something, record `not_run` and inject nothing.
+2. Record the gateway's error share and p99 as the baseline, then inject.
+3. Poll until every expected alert is firing and every evidence query has
+   returned a result, or the incident's deadline passes.
+4. Run the cleanup steps, whatever happened before.
+5. Wait until the cluster has been healthy, **and every evidence query has
+   returned nothing**, for 30 s in a row.
+
+An evidence query is written like an alert expression: it returns a result only
+while the fault is visible. Using the same queries in steps 3 and 5 is what
+makes "cleans up fully" a measurement against telemetry instead of an
+assumption that the cleanup commands worked. Every value in the resulting JSON
+record is read from Prometheus, Loki, the Kubernetes API or the clock during
+the run.
+
+The records for the first eight incidents, and an account of the three that
+failed a first pass and why, are in
+[`results/phase2-incidents/`](../results/phase2-incidents/README.md). Two
+things from those runs matter for later phases:
+
+- An incident usually raises more than its "own" alert. A slow inventory
+  replica raises latency and error-rate alerts at the gateway and makes
+  `stock.get` look like a slow database statement. The agent starts from a
+  symptom that several different faults share.
+- The check ran each incident once. Phase 5 repeats runs before quoting any
+  timing as typical.
 
 ## Agent
 
@@ -345,7 +457,7 @@ agent → score → cleanup → verify healthy.
 | Recovery success | Measured by the harness from Prometheus, independent of what the agent claims. |
 | Tokens and cost | Token counts as reported by the API, multiplied by a checked-in price table that records its source and retrieval date. |
 
-**Rubric (finalised in Phase 2, documented in `docs/RUBRIC.md`).** Scoring is by
+**Rubric ([`docs/RUBRIC.md`](RUBRIC.md), fixed in Phase 2 before any agent existed).** Scoring is by
 code, not by a model, so the same report always gets the same score. Ground
 truth is a set of causes; the report gives a set of causes; credit is awarded
 for matching component and matching fault category, with set-based precision and
@@ -367,11 +479,12 @@ estimate, and the report will say so.
 
 ```
 .
-├── Makefile                 # up, down, verify, test, lint; later inject, bench
+├── Makefile                 # up, down, verify, test, lint, inject, cleanup,
+│                            # incident-check; later bench
 ├── CLAUDE.md                # conventions for AI-assisted work on this repo
 ├── .env.example
-├── pyproject.toml           # Python tool config; the package itself comes in Phase 2
-├── docs/                    # ARCHITECTURE.md, later RUBRIC.md, GUARDRAILS.md
+├── pyproject.toml           # the Python package `oncall` and its tool config
+├── docs/                    # ARCHITECTURE.md, RUBRIC.md, later GUARDRAILS.md
 ├── scripts/                 # verify_testbed.py: the Phase 1 acceptance check
 ├── testbed/                 # Go module
 │   ├── cmd/                 # api-gateway, order-service, inventory-service,
@@ -387,11 +500,12 @@ estimate, and the report will say so.
 │   ├── observability/       # Prometheus, Loki, Tempo, collector, Grafana,
 │   │                        # kube-state-metrics; config/ and dashboards/
 │   ├── rbac/                # (Phase 3) agent ServiceAccounts and Roles
-│   └── chaos/               # (Phase 2) netem helper
+│   └── chaos/               # netem helper: manifest, image, script
 ├── incidents/               # one YAML per incident + JSON schema
 ├── src/oncall/              # Python package
 │   ├── agent/               # loop, llm client, tools/, guardrails/, report, trace
-│   ├── chaos/               # incident parsing, inject, cleanup
+│   ├── chaos/               # incident parsing, inject, cleanup, health,
+│   │                        # incident-check
 │   └── bench/               # harness, scoring, report generation, router
 ├── tests/                   # pytest: guardrails, scoring, incident parsing, replay
 ├── results/                 # committed outputs of real benchmark runs

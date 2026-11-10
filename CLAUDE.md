@@ -52,7 +52,7 @@ Apple M1, 8 GB RAM. The whole cluster should fit in a 4 GB Docker VM.
 | `scripts/` | `verify_testbed.py`, the acceptance check behind `make verify` |
 | `incidents/` | One YAML per incident, validated against a JSON schema |
 | `src/oncall/agent/` | Tool loop, tools, guardrails, report, trace |
-| `src/oncall/chaos/` | Incident parsing, inject, cleanup |
+| `src/oncall/chaos/` | Incident parsing, inject, cleanup, health definition, incident check |
 | `src/oncall/bench/` | Harness, scoring, report generation, router |
 | `tests/` | pytest |
 | `results/` | Committed outputs of real benchmark runs |
@@ -73,14 +73,25 @@ Added as phases land; do not document a target here until it exists and works.
 | `make status` | Pods, restarts, and memory use |
 | `make deploy` | Re-apply manifests after editing `deploy/` |
 | `make redeploy` | Rebuild the services image and roll the Go services |
-| `make test` | Go unit tests |
-| `make lint` | `go vet`, `golangci-lint`, `ruff`, and a kustomize render check |
+| `make test` | Go and Python unit tests |
+| `make lint` | `go vet`, `golangci-lint`, `ruff`, a kustomize render check, and incident validation |
+| `make incidents` | Validate the incident library and list it |
+| `make inject INCIDENT=<id>` | Inject one incident |
+| `make cleanup INCIDENT=<id>` | Undo one incident |
+| `make incident-check INCIDENT=<id>` | Inject, confirm the fault shows in telemetry, clean up, confirm recovery (`INCIDENT=--all` for every one, `OUT=<dir>` for the records) |
+| `make healthy` | Report whether the testbed is at its manifest state with no alert pending or firing |
 | `make dashboards` | Regenerate the Grafana dashboard JSON from `generate.py` |
 | `make proto` | Regenerate gRPC code from `testbed/proto` |
 
-Do not run a Go build, `make image` or `make redeploy` while a benchmark or a
-measurement is in progress: on this machine it starves the cluster (see "Known
-limits" in `docs/ARCHITECTURE.md`).
+Do not run a Go build, `make image`, `make redeploy`, `make test` or `make lint`
+while a benchmark or a measurement is in progress: on this machine it starves
+the cluster (see "Known limits" in `docs/ARCHITECTURE.md`).
+
+Editing `alerts.yml` or `prometheus.yml` recreates the Prometheus pod and wipes
+its history. Export anything a document quotes to `results/` first.
+
+After changing a model in `src/oncall/chaos/incident.py`, regenerate the schema:
+`uv run python -m oncall.chaos schema --write`.
 
 ## Conventions
 
