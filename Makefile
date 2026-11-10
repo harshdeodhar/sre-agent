@@ -6,6 +6,8 @@ SHELL := /bin/bash
 
 CLUSTER := sre-testbed
 IMAGE   := sre-testbed/services:dev
+# The netem helper used by network incidents (deploy/chaos).
+NETEM_IMAGE := sre-testbed/netem:dev
 
 # Every kubectl call in this project uses a kubeconfig that contains only the
 # k3d cluster. ~/.kube/config is never read or written, so a mistake here
@@ -19,7 +21,7 @@ GO_MODULE := github.com/harshdeodhar/sre-agent/testbed
 
 .PHONY: help
 help: ## Show this help
-	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
 
 # ---- Cluster lifecycle -------------------------------------------------------
 
@@ -48,9 +50,10 @@ cluster: ## Create the k3d cluster if it does not exist, and write its kubeconfi
 	@chmod 600 $(KUBECONFIG)
 
 .PHONY: image
-image: ## Build the services image and load it into the cluster
+image: ## Build the services and netem-helper images and load them into the cluster
 	docker build -t $(IMAGE) testbed
-	k3d image import $(IMAGE) --cluster $(CLUSTER)
+	docker build -t $(NETEM_IMAGE) deploy/chaos/netem
+	k3d image import $(IMAGE) $(NETEM_IMAGE) --cluster $(CLUSTER)
 
 .PHONY: secrets
 secrets: ## Generate the Postgres password as a Kubernetes Secret (once per cluster)
@@ -78,6 +81,7 @@ wait: ## Wait until every workload is available
 	kubectl -n observability rollout status daemonset/otel-collector --timeout=600s
 	kubectl -n testbed wait --for=condition=Available deployment --all --timeout=600s
 	kubectl -n loadgen wait --for=condition=Available deployment --all --timeout=600s
+	kubectl -n chaos wait --for=condition=Available deployment --all --timeout=600s
 
 .PHONY: redeploy
 redeploy: image ## Rebuild the services image and restart the Go services with it
@@ -90,6 +94,7 @@ status: ## Show pods and their memory use
 	kubectl get pods -n testbed -o wide
 	kubectl get pods -n observability
 	kubectl get pods -n loadgen
+	kubectl get pods -n chaos
 	@echo
 	kubectl top pods -n testbed --containers || true
 	kubectl top pods -n observability || true
@@ -99,20 +104,51 @@ status: ## Show pods and their memory use
 verify: ## Check that live traffic shows up in Prometheus, Loki, Tempo and Grafana
 	python3 scripts/verify_testbed.py
 
+# ---- Incidents -----------------------------------------------------------------
+
+# The incident tooling (src/oncall/chaos), run in the project's virtualenv.
+CHAOS := uv run python -m oncall.chaos
+# Where `make incident-check` writes its records. runs/ is gitignored; records
+# worth keeping are written to results/ by passing OUT=.
+OUT ?= runs/incident-checks
+
+.PHONY: incidents
+incidents: ## Validate the incident library and list it
+	$(CHAOS) validate
+	$(CHAOS) list
+
+.PHONY: inject
+inject: ## Inject one incident: make inject INCIDENT=<id>
+	$(CHAOS) inject $(INCIDENT)
+
+.PHONY: cleanup
+cleanup: ## Undo one incident: make cleanup INCIDENT=<id>
+	$(CHAOS) cleanup $(INCIDENT)
+
+.PHONY: incident-check
+incident-check: ## Inject, confirm it shows in telemetry, clean up, confirm recovery: make incident-check INCIDENT=<id> (or INCIDENT=--all)
+	$(CHAOS) check $(INCIDENT) --out $(OUT)
+
+.PHONY: healthy
+healthy: ## Report whether the testbed is in its intended, alert-free state
+	$(CHAOS) status
+
 # ---- Development ---------------------------------------------------------------
 
 .PHONY: test
-test: ## Run the Go unit tests
+test: ## Run the Go and Python unit tests (no cluster or API key needed)
 	cd testbed && go test ./...
+	uv run pytest -q
 
 .PHONY: lint
 lint: ## Lint and format-check Go and Python, and check that the manifests render
 	cd testbed && go vet ./...
 	cd testbed && golangci-lint run ./...
 	cd testbed && golangci-lint fmt --diff ./...
-	ruff check scripts deploy
-	ruff format --check scripts deploy
+	ruff check scripts deploy src tests results
+	ruff format --check scripts deploy src tests results
 	kubectl kustomize deploy >/dev/null
+	$(CHAOS) validate
 
 .PHONY: proto
 proto: ## Regenerate Go code from testbed/proto (needs protoc; installs the Go plugins into ./bin)
