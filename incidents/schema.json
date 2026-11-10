@@ -1,0 +1,622 @@
+{
+  "$defs": {
+    "Cause": {
+      "additionalProperties": false,
+      "description": "One root cause: which component, and what kind of fault.",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/FaultCategory"
+        },
+        "component": {
+          "$ref": "#/$defs/Component"
+        },
+        "explanation": {
+          "minLength": 1,
+          "title": "Explanation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "category",
+        "explanation"
+      ],
+      "title": "Cause",
+      "type": "object"
+    },
+    "ClearNetem": {
+      "additionalProperties": false,
+      "description": "Remove netem from every pod of a service. A no-op where there is none.",
+      "properties": {
+        "action": {
+          "const": "clear_netem",
+          "title": "Action",
+          "type": "string"
+        },
+        "deployment": {
+          "enum": [
+            "api-gateway",
+            "order-service",
+            "inventory-service",
+            "notification-worker"
+          ],
+          "title": "Deployment",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "deployment"
+      ],
+      "title": "ClearNetem",
+      "type": "object"
+    },
+    "Component": {
+      "description": "Everything in the testbed namespace that can be the site of a fault.",
+      "enum": [
+        "api-gateway",
+        "order-service",
+        "inventory-service",
+        "notification-worker",
+        "postgres",
+        "redis",
+        "nats"
+      ],
+      "title": "Component",
+      "type": "string"
+    },
+    "Detection": {
+      "additionalProperties": false,
+      "properties": {
+        "alerts": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Alerts",
+          "type": "array"
+        },
+        "deadline_seconds": {
+          "maximum": 900,
+          "minimum": 30,
+          "title": "Deadline Seconds",
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "alerts",
+        "deadline_seconds",
+        "evidence"
+      ],
+      "title": "Detection",
+      "type": "object"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "description": "A telemetry query that returns a result while the fault is active.\n\nWritten like an alert rule: the query filters with a comparison, so \"any\nseries returned\" means \"the signal is present\". The same queries must\nreturn nothing again after cleanup; that is how cleanup is verified\nagainst telemetry and not just assumed.",
+      "properties": {
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "query": {
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "prometheus",
+            "loki"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "source",
+        "query"
+      ],
+      "title": "Evidence",
+      "type": "object"
+    },
+    "FaultCategory": {
+      "description": "What kind of defect has to be fixed.\n\nCategories describe causes, never symptoms: \"crash loop\" and \"consumer lag\"\nare not here, because each can have several different causes.",
+      "enum": [
+        "bad_config_value",
+        "bad_image",
+        "memory_limit_too_low",
+        "memory_leak",
+        "cpu_limit_too_low",
+        "insufficient_replicas",
+        "network_latency",
+        "network_packet_loss",
+        "network_partition",
+        "missing_index",
+        "lock_contention",
+        "connection_pool_too_small",
+        "cache_memory_too_low",
+        "dependency_unavailable",
+        "disk_full",
+        "dns_failure",
+        "expired_credentials",
+        "traffic_spike"
+      ],
+      "title": "FaultCategory",
+      "type": "string"
+    },
+    "GroundTruth": {
+      "additionalProperties": false,
+      "properties": {
+        "causes": {
+          "items": {
+            "$ref": "#/$defs/Cause"
+          },
+          "minItems": 1,
+          "title": "Causes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "causes"
+      ],
+      "title": "GroundTruth",
+      "type": "object"
+    },
+    "Netem": {
+      "additionalProperties": false,
+      "description": "Delay or drop packets leaving a service's pods (Linux `tc netem`).\n\nApplied from outside the pod, in its network namespace, by the helper in\nthe chaos namespace. Nothing in the pod's spec or status changes.",
+      "properties": {
+        "action": {
+          "const": "netem",
+          "title": "Action",
+          "type": "string"
+        },
+        "delay_ms": {
+          "default": 0,
+          "maximum": 5000,
+          "minimum": 0,
+          "title": "Delay Ms",
+          "type": "integer"
+        },
+        "deployment": {
+          "enum": [
+            "api-gateway",
+            "order-service",
+            "inventory-service",
+            "notification-worker"
+          ],
+          "title": "Deployment",
+          "type": "string"
+        },
+        "jitter_ms": {
+          "default": 0,
+          "maximum": 5000,
+          "minimum": 0,
+          "title": "Jitter Ms",
+          "type": "integer"
+        },
+        "loss_percent": {
+          "default": 0,
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Loss Percent",
+          "type": "number"
+        },
+        "pods": {
+          "enum": [
+            "first",
+            "all"
+          ],
+          "title": "Pods",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "deployment",
+        "pods"
+      ],
+      "title": "Netem",
+      "type": "object"
+    },
+    "PostgresSQL": {
+      "additionalProperties": false,
+      "description": "Run one SQL statement in the shop database, as its owner.",
+      "properties": {
+        "action": {
+          "const": "postgres_sql",
+          "title": "Action",
+          "type": "string"
+        },
+        "sql": {
+          "minLength": 1,
+          "title": "Sql",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "sql"
+      ],
+      "title": "PostgresSQL",
+      "type": "object"
+    },
+    "RedisCommand": {
+      "additionalProperties": false,
+      "description": "Run one Redis command, given as its words: [\"CONFIG\", \"SET\", ...].",
+      "properties": {
+        "action": {
+          "const": "redis_command",
+          "title": "Action",
+          "type": "string"
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Args",
+          "type": "array"
+        }
+      },
+      "required": [
+        "action",
+        "args"
+      ],
+      "title": "RedisCommand",
+      "type": "object"
+    },
+    "Remediation": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/RemediationAction"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Component"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "action",
+        "description"
+      ],
+      "title": "Remediation",
+      "type": "object"
+    },
+    "RemediationAction": {
+      "description": "What can fix an incident: the agent's four write tools, or a human.\n\nMANUAL marks a fix none of the agent's tools can perform (recreating a\ndatabase index, for example). The right outcome there is a correct\nrecommendation, not a write action.",
+      "enum": [
+        "rollback_deployment",
+        "scale_deployment",
+        "restart_pod",
+        "revert_config",
+        "manual"
+      ],
+      "title": "RemediationAction",
+      "type": "string"
+    },
+    "RestoreDeployment": {
+      "additionalProperties": false,
+      "description": "Put a service's Deployment back to exactly what the repo's manifest says.\n\nCleanup does not undo the injection step by step. It states the wanted end\nstate, so it is also correct after an agent has rolled back, scaled or\nrestarted things in between, and running it twice does no harm.",
+      "properties": {
+        "action": {
+          "const": "restore_deployment",
+          "title": "Action",
+          "type": "string"
+        },
+        "deployment": {
+          "enum": [
+            "api-gateway",
+            "order-service",
+            "inventory-service",
+            "notification-worker"
+          ],
+          "title": "Deployment",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "deployment"
+      ],
+      "title": "RestoreDeployment",
+      "type": "object"
+    },
+    "Scale": {
+      "additionalProperties": false,
+      "description": "Change a service's replica count. Leaves no entry in rollout history.",
+      "properties": {
+        "action": {
+          "const": "scale",
+          "title": "Action",
+          "type": "string"
+        },
+        "deployment": {
+          "enum": [
+            "api-gateway",
+            "order-service",
+            "inventory-service",
+            "notification-worker"
+          ],
+          "title": "Deployment",
+          "type": "string"
+        },
+        "replicas": {
+          "maximum": 4,
+          "minimum": 0,
+          "title": "Replicas",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "action",
+        "deployment",
+        "replicas"
+      ],
+      "title": "Scale",
+      "type": "object"
+    },
+    "Scenario": {
+      "description": "The incident classes the project brief asks the library to cover.\n\nThese are symptom patterns, used only to report coverage. They play no part\nin scoring.",
+      "enum": [
+        "crash_loop",
+        "oom",
+        "consumer_lag",
+        "network",
+        "bad_config_push",
+        "pool_exhaustion",
+        "redis_eviction",
+        "slow_query",
+        "cascading_failure",
+        "multi_cause"
+      ],
+      "title": "Scenario",
+      "type": "string"
+    },
+    "SetEnv": {
+      "additionalProperties": false,
+      "description": "Change environment variables of a service. A real rollout: new ReplicaSet.",
+      "properties": {
+        "action": {
+          "const": "set_env",
+          "title": "Action",
+          "type": "string"
+        },
+        "deployment": {
+          "enum": [
+            "api-gateway",
+            "order-service",
+            "inventory-service",
+            "notification-worker"
+          ],
+          "title": "Deployment",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "minProperties": 1,
+          "title": "Env",
+          "type": "object"
+        }
+      },
+      "required": [
+        "action",
+        "deployment",
+        "env"
+      ],
+      "title": "SetEnv",
+      "type": "object"
+    },
+    "SetResources": {
+      "additionalProperties": false,
+      "description": "Change a service container's resource requests and limits. Also a real rollout.\n\nBoth can be given because Kubernetes rejects a limit below the request:\nlowering a limit under the current request means lowering the request too,\nexactly as someone \"right-sizing\" a workload would.",
+      "properties": {
+        "action": {
+          "const": "set_resources",
+          "title": "Action",
+          "type": "string"
+        },
+        "deployment": {
+          "enum": [
+            "api-gateway",
+            "order-service",
+            "inventory-service",
+            "notification-worker"
+          ],
+          "title": "Deployment",
+          "type": "string"
+        },
+        "limits": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "propertyNames": {
+            "enum": [
+              "cpu",
+              "memory"
+            ]
+          },
+          "title": "Limits",
+          "type": "object"
+        },
+        "requests": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "propertyNames": {
+            "enum": [
+              "cpu",
+              "memory"
+            ]
+          },
+          "title": "Requests",
+          "type": "object"
+        }
+      },
+      "required": [
+        "action",
+        "deployment"
+      ],
+      "title": "SetResources",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "acceptable_remediations": {
+      "items": {
+        "$ref": "#/$defs/Remediation"
+      },
+      "minItems": 1,
+      "title": "Acceptable Remediations",
+      "type": "array"
+    },
+    "affected_services": {
+      "items": {
+        "$ref": "#/$defs/Component"
+      },
+      "minItems": 1,
+      "title": "Affected Services",
+      "type": "array"
+    },
+    "cleanup": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "clear_netem": "#/$defs/ClearNetem",
+            "postgres_sql": "#/$defs/PostgresSQL",
+            "redis_command": "#/$defs/RedisCommand",
+            "restore_deployment": "#/$defs/RestoreDeployment"
+          },
+          "propertyName": "action"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/RestoreDeployment"
+          },
+          {
+            "$ref": "#/$defs/ClearNetem"
+          },
+          {
+            "$ref": "#/$defs/PostgresSQL"
+          },
+          {
+            "$ref": "#/$defs/RedisCommand"
+          }
+        ]
+      },
+      "minItems": 1,
+      "title": "Cleanup",
+      "type": "array"
+    },
+    "description": {
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "detection": {
+      "$ref": "#/$defs/Detection"
+    },
+    "ground_truth": {
+      "$ref": "#/$defs/GroundTruth"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "inject": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "netem": "#/$defs/Netem",
+            "postgres_sql": "#/$defs/PostgresSQL",
+            "redis_command": "#/$defs/RedisCommand",
+            "scale": "#/$defs/Scale",
+            "set_env": "#/$defs/SetEnv",
+            "set_resources": "#/$defs/SetResources"
+          },
+          "propertyName": "action"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SetEnv"
+          },
+          {
+            "$ref": "#/$defs/SetResources"
+          },
+          {
+            "$ref": "#/$defs/Scale"
+          },
+          {
+            "$ref": "#/$defs/PostgresSQL"
+          },
+          {
+            "$ref": "#/$defs/RedisCommand"
+          },
+          {
+            "$ref": "#/$defs/Netem"
+          }
+        ]
+      },
+      "minItems": 1,
+      "title": "Inject",
+      "type": "array"
+    },
+    "scenarios": {
+      "items": {
+        "$ref": "#/$defs/Scenario"
+      },
+      "minItems": 1,
+      "title": "Scenarios",
+      "type": "array"
+    },
+    "title": {
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "title",
+    "description",
+    "scenarios",
+    "inject",
+    "cleanup",
+    "ground_truth",
+    "affected_services",
+    "detection",
+    "acceptable_remediations"
+  ],
+  "title": "Incident",
+  "type": "object"
+}

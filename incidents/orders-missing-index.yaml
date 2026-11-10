@@ -1,0 +1,40 @@
+id: orders-missing-index
+title: A dropped index turns the customer order list into a table scan
+description: |
+  The index on orders (customer_id, created_at) is dropped. Listing a
+  customer's orders now reads the whole orders table instead of a handful of
+  index entries. The query still succeeds, and it stays below Postgres's
+  slow-statement log threshold, so nothing is logged: the only signs are the
+  statement's duration and the number of sequential scans on the table.
+scenarios: [slow_query]
+
+inject:
+  - action: postgres_sql
+    sql: DROP INDEX IF EXISTS orders_customer_created_idx
+
+cleanup:
+  - action: postgres_sql
+    sql: CREATE INDEX IF NOT EXISTS orders_customer_created_idx ON orders (customer_id, created_at DESC)
+
+ground_truth:
+  causes:
+    - component: postgres
+      category: missing_index
+      explanation: orders_customer_created_idx is gone, so orders.list_by_customer scans the table.
+
+affected_services: [order-service, api-gateway]
+
+detection:
+  alerts: [DatabaseQuerySlow]
+  deadline_seconds: 420
+  evidence:
+    - description: the orders table is being scanned sequentially
+      source: prometheus
+      query: rate(pg_stat_user_tables_seq_scan{relname="orders"}[1m]) > 0.1
+    - description: the median duration of orders.list_by_customer is above 25 ms
+      source: prometheus
+      query: histogram_quantile(0.5, sum by (le) (rate(db_query_duration_seconds_bucket{job="order-service", query="orders.list_by_customer"}[1m]))) > 0.025
+
+acceptable_remediations:
+  - action: manual
+    description: Recreate the index on orders (customer_id, created_at DESC).

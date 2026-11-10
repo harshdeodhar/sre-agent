@@ -1,0 +1,46 @@
+id: gateway-crashloop-bad-duration
+title: A config push with an unparsable timeout crash-loops the new gateway pods
+description: |
+  Someone sets the gateway's upstream timeout to "2", dropping the unit. The
+  gateway refuses to start with a duration it cannot parse, so the pod of the
+  new revision exits at startup and goes into CrashLoopBackOff. The rolling
+  update never takes an old pod away (maxUnavailable is 0), so the old pods
+  keep serving and users notice nothing: the rollout is stuck, not the service.
+scenarios: [crash_loop]
+
+inject:
+  - action: set_env
+    deployment: api-gateway
+    env:
+      UPSTREAM_TIMEOUT: "2"
+
+cleanup:
+  - action: restore_deployment
+    deployment: api-gateway
+
+ground_truth:
+  causes:
+    - component: api-gateway
+      category: bad_config_value
+      explanation: UPSTREAM_TIMEOUT is "2", which is not a duration; the process exits at startup.
+
+affected_services: [api-gateway]
+
+detection:
+  alerts: [ContainerRestartingRepeatedly, DeploymentReplicasUnavailable]
+  deadline_seconds: 360
+  evidence:
+    - description: an api-gateway container is waiting in CrashLoopBackOff
+      source: prometheus
+      query: kube_pod_container_status_waiting_reason{namespace="testbed", container="api-gateway", reason="CrashLoopBackOff"} > 0
+    - description: the gateway logs that its configuration is invalid
+      source: loki
+      query: sum(count_over_time({service_name="api-gateway"} |= "invalid configuration" [2m])) > 0
+
+acceptable_remediations:
+  - action: rollback_deployment
+    target: api-gateway
+    description: Roll the Deployment back to the previous revision.
+  - action: revert_config
+    target: api-gateway
+    description: Set UPSTREAM_TIMEOUT back to a valid duration.

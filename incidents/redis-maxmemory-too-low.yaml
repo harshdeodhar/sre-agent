@@ -1,0 +1,47 @@
+id: redis-maxmemory-too-low
+title: Redis is capped at 1 MB at runtime and can no longer hold the cache
+description: |
+  Redis's memory ceiling is lowered from 64mb to 1mb with CONFIG SET, a
+  runtime change that leaves no trace in any Kubernetes object. One megabyte
+  is less than Redis needs for its own bookkeeping, so it evicts every key and
+  then rejects new writes. The inventory service keeps working, because it
+  falls back to Postgres, but nothing is served from the cache any more and
+  every stock lookup becomes a database query.
+scenarios: [redis_eviction]
+
+inject:
+  - action: redis_command
+    args: [CONFIG, SET, maxmemory, 1mb]
+
+cleanup:
+  - action: redis_command
+    args: [CONFIG, SET, maxmemory, 64mb]
+
+ground_truth:
+  causes:
+    - component: redis
+      category: cache_memory_too_low
+      explanation: maxmemory is 1mb, below what Redis uses with an empty data set.
+
+affected_services: [inventory-service, postgres]
+
+detection:
+  alerts: [CacheHitRatioLow]
+  deadline_seconds: 420
+  evidence:
+    - description: Redis's configured memory ceiling is far below the 64 MB in its manifest
+      source: prometheus
+      query: redis_memory_max_bytes < 16777216
+    - description: more than 90% of stock lookups miss the cache
+      source: prometheus
+      query: sum(rate(inventory_cache_requests_total{result="miss"}[1m])) / sum(rate(inventory_cache_requests_total[1m])) > 0.9
+    - description: the inventory service logs that cache writes fail
+      source: loki
+      query: sum(count_over_time({service_name="inventory-service"} |= "cache write failed" [1m])) > 5
+
+acceptable_remediations:
+  - action: restart_pod
+    target: redis
+    description: Restart Redis; it comes back with the 64mb ceiling from its manifest, and an empty cache.
+  - action: manual
+    description: Raise maxmemory back to 64mb with CONFIG SET.

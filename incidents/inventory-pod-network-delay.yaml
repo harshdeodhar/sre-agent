@@ -1,0 +1,48 @@
+id: inventory-pod-network-delay
+title: One inventory replica answers through a slow network path
+description: |
+  Every packet leaving one of the two inventory-service pods is delayed by
+  about 300 ms. Kubernetes sees nothing wrong: the pod is Running and Ready,
+  and nothing in its spec, status or events has changed. But each of its
+  replies, and each of its own requests to Redis and Postgres, now takes
+  300 ms longer. Callers spread their calls over both replicas, so about
+  half of the calls to the inventory service are slow and the other half are
+  as fast as ever.
+scenarios: [network]
+
+inject:
+  - action: netem
+    deployment: inventory-service
+    pods: first
+    delay_ms: 300
+    jitter_ms: 50
+
+cleanup:
+  - action: clear_netem
+    deployment: inventory-service
+
+ground_truth:
+  causes:
+    - component: inventory-service
+      category: network_latency
+      explanation: Packets leaving one inventory-service pod are delayed by about 300 ms.
+
+affected_services: [inventory-service, order-service, api-gateway]
+
+detection:
+  alerts: [GatewayLatencyHigh, GatewayErrorRateHigh]
+  deadline_seconds: 360
+  evidence:
+    - description: one inventory-service pod handles GetStock far slower than normal
+      source: prometheus
+      query: histogram_quantile(0.5, sum by (pod, le) (rate(grpc_server_handling_seconds_bucket{job="inventory-service", grpc_method="GetStock"}[1m]))) > 0.25
+    - description: the inventory service logs that cache reads fail
+      source: loki
+      query: sum(count_over_time({service_name="inventory-service"} |= "cache read failed" [1m])) > 5
+
+acceptable_remediations:
+  - action: restart_pod
+    target: inventory-service
+    description: Delete the slow pod; its replacement gets a fresh network namespace.
+  - action: manual
+    description: Take the slow replica out of rotation and have the node's network investigated.

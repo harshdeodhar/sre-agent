@@ -1,0 +1,49 @@
+id: orders-inventory-timeout-too-short
+title: A timeout set to 1 ms makes every order fail while all pods stay healthy
+description: |
+  The order service's timeout for its stock reservation call is changed from
+  1s to 1ms. The value parses, the pods start and pass their probes, and the
+  rollout completes. But no reservation can finish in a millisecond, so every
+  order fails with a deadline error and the gateway answers 504. The inventory
+  service is healthy: the fault is in the caller's setting.
+scenarios: [bad_config_push]
+
+inject:
+  - action: set_env
+    deployment: order-service
+    env:
+      INVENTORY_TIMEOUT: 1ms
+
+cleanup:
+  - action: restore_deployment
+    deployment: order-service
+
+ground_truth:
+  causes:
+    - component: order-service
+      category: bad_config_value
+      explanation: INVENTORY_TIMEOUT is 1ms, far below what a stock reservation takes.
+
+affected_services: [order-service, api-gateway]
+
+detection:
+  alerts: [GatewayErrorRateHigh]
+  deadline_seconds: 360
+  evidence:
+    - description: the gateway answers 504 on POST /api/orders
+      source: prometheus
+      query: sum(rate(http_server_requests_total{job="api-gateway", route="POST /api/orders", code="504"}[1m])) > 0.5
+    - description: the order service's calls to ReserveStock end in DeadlineExceeded
+      source: prometheus
+      query: sum(rate(grpc_client_handled_total{job="order-service", grpc_method="ReserveStock", grpc_code="DeadlineExceeded"}[1m])) > 0.5
+    - description: almost no orders are created
+      source: prometheus
+      query: sum(rate(orders_created_total[1m])) < 0.2
+
+acceptable_remediations:
+  - action: rollback_deployment
+    target: order-service
+    description: Roll the Deployment back to the previous revision.
+  - action: revert_config
+    target: order-service
+    description: Set INVENTORY_TIMEOUT back to 1s.

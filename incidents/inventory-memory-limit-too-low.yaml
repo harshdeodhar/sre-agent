@@ -1,0 +1,49 @@
+id: inventory-memory-limit-too-low
+title: A memory limit below the service's working set gets it OOM-killed
+description: |
+  The inventory service is "right-sized" far too tightly: its memory request
+  goes from 32Mi to 8Mi and its limit from 96Mi to 12Mi. A freshly started
+  replica settles at about 15 MiB once it serves traffic, so each container
+  starts, becomes ready, takes traffic for about half a minute, and is then
+  killed by the kernel (OOMKilled). Both replicas do this over and over.
+  Nothing leaks: the limit is simply below what the service needs.
+
+  The limit was chosen by measurement. At 20Mi the service kept running; see
+  results/phase2-incidents/README.md.
+scenarios: [oom]
+
+inject:
+  - action: set_resources
+    deployment: inventory-service
+    requests:
+      memory: 8Mi
+    limits:
+      memory: 12Mi
+
+cleanup:
+  - action: restore_deployment
+    deployment: inventory-service
+
+ground_truth:
+  causes:
+    - component: inventory-service
+      category: memory_limit_too_low
+      explanation: The container's memory limit (12Mi) is below its normal working set of about 15 MiB.
+
+affected_services: [inventory-service, order-service, api-gateway]
+
+detection:
+  alerts: [ContainerRestartingRepeatedly]
+  deadline_seconds: 360
+  evidence:
+    - description: an inventory-service container was last terminated with reason OOMKilled
+      source: prometheus
+      query: kube_pod_container_status_last_terminated_reason{namespace="testbed", container="inventory-service", reason="OOMKilled"} > 0
+
+acceptable_remediations:
+  - action: rollback_deployment
+    target: inventory-service
+    description: Roll the Deployment back to the revision with the 96Mi limit.
+  - action: revert_config
+    target: inventory-service
+    description: Raise the memory limit back to 96Mi.

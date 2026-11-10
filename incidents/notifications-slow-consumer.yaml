@@ -1,0 +1,46 @@
+id: notifications-slow-consumer
+title: A per-message delay of 2 s lets the notification queue grow without bound
+description: |
+  The notification worker's simulated send delay is changed from 25ms to 2s.
+  The worker handles one message at a time, so it now completes one every two
+  seconds while orders arrive at about two per second. Nothing fails and
+  nothing restarts; the queue of unprocessed order events just keeps growing
+  and notifications arrive later and later.
+scenarios: [consumer_lag]
+
+inject:
+  - action: set_env
+    deployment: notification-worker
+    env:
+      SEND_DELAY: 2s
+
+cleanup:
+  - action: restore_deployment
+    deployment: notification-worker
+
+ground_truth:
+  causes:
+    - component: notification-worker
+      category: bad_config_value
+      explanation: SEND_DELAY is 2s, so the worker processes far fewer messages than arrive.
+
+affected_services: [notification-worker]
+
+detection:
+  alerts: [ConsumerLagHigh]
+  deadline_seconds: 420
+  evidence:
+    - description: more than 100 messages are pending for the notification-worker consumer
+      source: prometheus
+      query: jetstream_consumer_num_pending{namespace="testbed", consumer_name="notification-worker"} > 100
+    - description: the median delay between an order and its notification is above 10 s
+      source: prometheus
+      query: histogram_quantile(0.5, sum by (le) (rate(notification_delivery_lag_seconds_bucket[1m]))) > 10
+
+acceptable_remediations:
+  - action: rollback_deployment
+    target: notification-worker
+    description: Roll the Deployment back to the previous revision.
+  - action: revert_config
+    target: notification-worker
+    description: Set SEND_DELAY back to 25ms.

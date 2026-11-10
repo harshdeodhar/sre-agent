@@ -1,0 +1,57 @@
+id: multi-worker-scaled-down-and-missing-index
+title: 'Two unrelated faults at once: no notification workers, and a dropped index'
+description: |
+  Two independent things go wrong together. The notification worker is scaled
+  to zero, so order events pile up unprocessed. And the index behind the
+  customer order list is dropped, so that query scans the orders table.
+  Neither fault explains the other's symptoms; a report that names only one
+  of them has found half of the problem.
+scenarios: [multi_cause, consumer_lag, slow_query]
+
+inject:
+  - action: scale
+    deployment: notification-worker
+    replicas: 0
+  - action: postgres_sql
+    sql: DROP INDEX IF EXISTS orders_customer_created_idx
+
+cleanup:
+  - action: restore_deployment
+    deployment: notification-worker
+  - action: postgres_sql
+    sql: CREATE INDEX IF NOT EXISTS orders_customer_created_idx ON orders (customer_id, created_at DESC)
+
+ground_truth:
+  causes:
+    - component: notification-worker
+      category: insufficient_replicas
+      explanation: The Deployment is scaled to 0, so nothing consumes order events.
+    - component: postgres
+      category: missing_index
+      explanation: orders_customer_created_idx is gone, so orders.list_by_customer scans the table.
+
+affected_services: [notification-worker, order-service, api-gateway]
+
+detection:
+  alerts: [ConsumerLagHigh, DatabaseQuerySlow]
+  deadline_seconds: 420
+  evidence:
+    - description: more than 100 messages are pending for the notification-worker consumer
+      source: prometheus
+      query: jetstream_consumer_num_pending{namespace="testbed", consumer_name="notification-worker"} > 100
+    - description: the notification-worker Deployment is scaled to zero
+      source: prometheus
+      query: kube_deployment_spec_replicas{namespace="testbed", deployment="notification-worker"} == 0
+    - description: the orders table is being scanned sequentially
+      source: prometheus
+      query: rate(pg_stat_user_tables_seq_scan{relname="orders"}[1m]) > 0.1
+    - description: the median duration of orders.list_by_customer is above 25 ms
+      source: prometheus
+      query: histogram_quantile(0.5, sum by (le) (rate(db_query_duration_seconds_bucket{job="order-service", query="orders.list_by_customer"}[1m]))) > 0.025
+
+acceptable_remediations:
+  - action: scale_deployment
+    target: notification-worker
+    description: Scale the notification worker back up to 1 replica.
+  - action: manual
+    description: Recreate the index on orders (customer_id, created_at DESC).
