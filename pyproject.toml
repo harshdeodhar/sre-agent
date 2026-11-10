@@ -1,0 +1,15 @@
+# Tool configuration only, for now. The Python package (src/oncall) and its
+# [project] table arrive with the first Python code that needs dependencies;
+# the scripts that exist today use the standard library alone.
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: import order, B: bugbear (likely bugs),
+# UP: outdated syntax, SIM: needless complexity, ANN: missing type hints.
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "ANN"]
+# Line length belongs to the formatter. What it cannot wrap is long string
+# literals (PromQL queries, mostly), which read better unbroken.
+ignore = ["E501"]
