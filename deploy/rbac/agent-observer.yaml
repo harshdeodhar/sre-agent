@@ -1,0 +1,60 @@
+# The identity the agent's kubectl uses in `observe` mode.
+#
+# This is the second of two fences. The first is the agent's own code: its
+# tools can only build `get` and `describe` commands for a fixed list of
+# resource kinds in the testbed namespace (src/oncall/agent/tools/kube.py).
+# If that code had a bug, the API server would still refuse, because this
+# Role is all the agent's credentials allow.
+#
+# What the Role leaves out, on purpose:
+#   - every write verb (create, update, patch, delete)
+#   - Secrets (the Postgres password lives in one)
+#   - pods/log and pods/exec (logs are read from Loki; nothing is executed)
+#   - watch (the tools make one-shot queries)
+#   - every other namespace: it is a Role, not a ClusterRole, so the agent
+#     cannot see the chaos namespace, where fault injection would be visible
+#
+# Memory cost: none. These are API objects; nothing runs.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: oncall-agent-observer
+  namespace: testbed
+# No pod uses this account. Its tokens are minted on request by
+# `kubectl create token` (src/oncall/agent/identity.py) and expire in an hour.
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: oncall-agent-observer
+  namespace: testbed
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, endpoints, configmaps, events]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list]
+  # `kubectl describe` reads events and a Service's endpoints through these
+  # newer API groups.
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [get, list]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: oncall-agent-observer
+  namespace: testbed
+subjects:
+  - kind: ServiceAccount
+    name: oncall-agent-observer
+    namespace: testbed
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: oncall-agent-observer
