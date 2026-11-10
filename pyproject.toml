@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "AI on-call (SRE) agent with an incident benchmark"
 requires-python = ">=3.13"
 dependencies = [
+    # The official Anthropic SDK. Pinned to one major version: the agent loop
+    # depends on the shape of requests and responses.
+    "anthropic>=2.8,<3",
     # Typed models for everything parsed from YAML or JSON.
     "pydantic>=2.9,<3",
     "pyyaml>=6,<7",
