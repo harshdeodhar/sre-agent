@@ -1,0 +1,6 @@
+# Where the incident injector's own tooling runs. Kept apart from `testbed` so
+# that nothing the agent is allowed to look at can show how a fault got there.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos

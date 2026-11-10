@@ -1,0 +1,46 @@
+# The netem helper: an idle pod the incident injector `kubectl exec`s into to
+# delay or drop packets of a testbed pod (see netem/pod-netem.sh).
+#
+# Memory cost: the pod runs `sleep`. Request 8 MiB, limit 32 MiB.
+#
+# It is the one privileged workload in the cluster, and needs to be:
+#   hostPID     to find a process of the target pod,
+#   privileged  to enter that process's network namespace (CAP_SYS_ADMIN,
+#               CAP_SYS_PTRACE) and to configure its interface (CAP_NET_ADMIN).
+# That is acceptable only because the cluster is a throwaway on a laptop. The
+# agent cannot use this pod: its ServiceAccount has no permissions in this
+# namespace, and nothing here is scraped, logged or traced.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netem-helper
+  namespace: chaos
+  labels:
+    app: netem-helper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: netem-helper
+  template:
+    metadata:
+      labels:
+        app: netem-helper
+    spec:
+      hostPID: true
+      # Nothing in the pod talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      # `sleep` ignores SIGTERM as PID 1; do not wait 30 s for it on delete.
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: netem-helper
+          image: sre-testbed/netem:dev
+          imagePullPolicy: Never
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              memory: 32Mi
+          securityContext:
+            privileged: true
