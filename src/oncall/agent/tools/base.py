@@ -17,6 +17,8 @@ from typing import Any, Literal, Protocol
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError
 
+from oncall.agent.guardrails.record import ActionRecord
+
 # The largest tool result handed to the model, in characters (roughly 1,500 to
 # 2,000 tokens). The whole conversation is re-read on every model request, so
 # one unbounded `kubectl get -o yaml` would be paid for on every later turn.
@@ -75,6 +77,8 @@ class Tool[P: Params]:
 class ToolOutcome:
     text: str
     is_error: bool
+    # Set for a write tool: what the gate decided, whatever it was.
+    action: ActionRecord | None = None
 
 
 class ToolRunner(Protocol):

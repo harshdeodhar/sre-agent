@@ -28,7 +28,8 @@ REVISION_ANNOTATION = "deployment.kubernetes.io/revision"
 
 # A Kubernetes object name: lower-case letters, digits, '-' and '.', starting
 # and ending with a letter or digit. Cannot start with '-', so it is never a flag.
-_NAME = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")
+# The write actions check their targets against it too.
+OBJECT_NAME = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")
 # Equality-based label selectors only: app=redis, tier!=db, a=b,c=d.
 _SELECTOR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./-]*(=|==|!=)[A-Za-z0-9_.-]*$")
 
@@ -232,7 +233,7 @@ def _recent_events(table: str) -> str:
 
 def _checked_name(name: str) -> str:
     # fullmatch, not match: with match, `$` would accept a trailing newline.
-    if not _NAME.fullmatch(name):
+    if not OBJECT_NAME.fullmatch(name):
         raise ToolError(
             f"{name!r} is not a valid object name (lower-case letters, digits, '-' and '.')"
         )
