@@ -1,0 +1,104 @@
+# The identity the agent's write gate uses in `propose` and `auto` mode.
+#
+# The second of two fences around the write tools. The first is the gate in
+# the agent's code (src/oncall/agent/guardrails/), which allows four actions
+# on the targets listed in guardrails/policy.py. If the gate had a bug, the
+# API server would still refuse anything outside what is granted here.
+#
+# Only the gate holds this identity, and only to dry-run and make a change.
+# Everything it reads, before and after a change, it reads as the observer.
+#
+# The names below repeat guardrails/policy.py, and
+# tests/agent/test_operator_rbac.py fails if the two disagree.
+#
+# Memory cost: none. These are API objects; nothing runs. The admission policy
+# is evaluated by the API server itself (CEL), with no webhook to run.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: oncall-agent-operator
+  namespace: testbed
+# No pod uses this account. Its tokens are minted on request by
+# `kubectl create token` (src/oncall/agent/identity.py) and expire in an hour.
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: oncall-agent-operator
+  namespace: testbed
+rules:
+  # rollback_deployment, scale_deployment and revert_config are each a JSON
+  # patch of one Deployment. Only the four services: never the stores.
+  # `kubectl patch` reads the object before it sends the patch, so it needs
+  # `get` as well (found by running it: without `get` every patch is refused).
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [api-gateway, inventory-service, notification-worker, order-service]
+    verbs: [get, patch]
+  # restart_pod deletes one pod. RBAC cannot name pods (their names are
+  # generated), so this rule covers every pod in testbed; the admission
+  # policy below narrows it to the pods of the allowed Deployments.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: oncall-agent-operator
+  namespace: testbed
+subjects:
+  - kind: ServiceAccount
+    name: oncall-agent-operator
+    namespace: testbed
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: oncall-agent-operator
+---
+# What RBAC cannot say: which pods may be deleted, and which replica counts a
+# Deployment may be given. Applies to requests from the operator account only,
+# dry runs included, so a proposal the API server would refuse is refused
+# before anyone is asked to approve it.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: oncall-agent-operator
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [DELETE]
+        resources: [pods]
+      # A PATCH is admitted as an UPDATE.
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [deployments]
+  matchConditions:
+    - name: from-the-agent-operator
+      expression: >-
+        request.userInfo.username == "system:serviceaccount:testbed:oncall-agent-operator"
+  validations:
+    # On a DELETE, `object` is null and `oldObject` is the pod being deleted.
+    - expression: >-
+        request.resource.resource != "pods" ||
+        (has(oldObject.metadata.labels) && "app" in oldObject.metadata.labels &&
+        oldObject.metadata.labels["app"] in
+        ["api-gateway", "inventory-service", "notification-worker", "order-service", "redis"])
+      message: the agent may only delete pods of the four services and of redis
+    - expression: >-
+        request.resource.resource != "deployments" ||
+        (object.spec.replicas >= 1 && object.spec.replicas <= 3)
+      message: the agent may only give a Deployment between 1 and 3 replicas
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: oncall-agent-operator
+spec:
+  policyName: oncall-agent-operator
+  validationActions: [Deny]

@@ -3,3 +3,4 @@ kind: Kustomization
 
 resources:
   - agent-observer.yaml
+  - agent-operator.yaml
