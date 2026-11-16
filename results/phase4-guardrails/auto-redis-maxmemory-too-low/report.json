@@ -1,0 +1,198 @@
+{
+  "page": "You have been paged. It is 2026-11-16 05:20:55 UTC.\n\nAlerts firing in namespace testbed (1):\n\n1. CacheHitRatioLow (severity: ticket)\n   Fewer than 20% of inventory stock lookups are served from the cache.\n   labels: {}\n   condition true since: 05:18:46 UTC\n   rule: sum(rate(inventory_cache_requests_total{result=\"hit\"}[2m])) / sum(rate(inventory_cache_requests_total[2m])) < 0.2\n\nInvestigate, then file the incident report with submit_report.",
+  "submission": {
+    "summary": "The cache hit ratio fell to 0% at about 05:18 because Redis's runtime maxmemory was lowered from 64 MB to 1 MB (1048576 bytes) with CONFIG SET at 05:17:23. Redis already held about 1.44 MB, so it rejects writes with OOM. Inventory-service therefore serves every stock lookup from Postgres, and the cache cannot be refilled. The user-facing impact so far is extra Postgres load and latency; gateway 5xx rates are back to 0 after an earlier node-not-ready incident (04:51-05:12), which is a separate, already-recovered event.",
+    "root_causes": [
+      {
+        "component": "redis",
+        "category": "cache_memory_too_low",
+        "explanation": "The running Redis instance has maxmemory = 1 MB, set at runtime by CONFIG SET maxmemory 1048576 at 05:17:23. The deployment still specifies --maxmemory 64mb, so the live value differs from the spec. Redis's data set (about 1.44 MB) is above the new ceiling, so writes fail with 'OOM command not allowed'. inventory-service logs 'cache write failed' for every miss, and cache reads return nothing, so every stock lookup falls through to Postgres and the hit ratio drops to 0.",
+        "confidence": "high"
+      }
+    ],
+    "evidence": [
+      {
+        "call_id": "c1",
+        "finding": "inventory_cache_requests_total rate: hit went from about 4 req/s to 0 at 05:18; miss rose from about 2.6 to about 7 req/s at 05:17-05:18. Error results 05:06-05:10 are from the earlier node incident."
+      },
+      {
+        "call_id": "c4",
+        "finding": "inventory-service logs repeated WARN 'cache write failed' with err 'OOM command not allowed when used memory > maxmemory' from 05:20 onward, on both inventory pods."
+      },
+      {
+        "call_id": "c8",
+        "finding": "redis deployment (revision 1, created 2026-11-10, unchanged) runs redis:7.4.5-alpine with args --maxmemory 64mb --maxmemory-policy allkeys-lru, so the spec does not explain the 1 MB value."
+      },
+      {
+        "call_id": "c9",
+        "finding": "redis_config_maxmemory was 67108864 (64 MB) through 05:09 and became 1048576 (1 MB) by 05:21."
+      },
+      {
+        "call_id": "c10",
+        "finding": "Redis log at 05:17:23: 'WARNING: the new maxmemory value set via CONFIG SET (1048576) is smaller than the current memory usage (1439032)'. The pod was not restarted (it started 04:42:45), so the change came from a runtime CONFIG SET."
+      },
+      {
+        "call_id": "c12",
+        "finding": "redis_commands cmd=config|set went to 0 rate at 05:18:16 after the earlier set traffic, consistent with a single manual CONFIG SET. redis_commands get rate stayed about 7/s, and redis_memory_used_bytes stayed about 1.44 MB."
+      },
+      {
+        "call_id": "c14",
+        "finding": "Gateway 5xx ratio is 0 from 05:13 to 05:21. The earlier spike (04:59-05:12, up to 26%) is the node-not-ready incident, now recovered. No user-facing errors are linked to the cache change yet."
+      }
+    ],
+    "timeline": [
+      {
+        "time": "04:42:45",
+        "event": "redis pod started with --maxmemory 64mb (restart count from the earlier node incident)"
+      },
+      {
+        "time": "05:17:23",
+        "event": "CONFIG SET maxmemory 1048576 (1 MB) applied to the running redis, below its 1.44 MB usage; Redis warns about it"
+      },
+      {
+        "time": "05:18:16",
+        "event": "config|set traffic seen in redis_commands; inventory cache hit rate drops to 0"
+      },
+      {
+        "time": "05:18:46",
+        "event": "CacheHitRatioLow condition becomes true"
+      },
+      {
+        "time": "05:20:55",
+        "event": "inventory-service logs 'cache write failed: OOM command not allowed' (ongoing)"
+      },
+      {
+        "time": "05:21:11",
+        "event": "redis_config_maxmemory scrape shows 1048576"
+      },
+      {
+        "time": "05:21",
+        "event": "restart_pod on redis-7d9d88cc-lnhpm proposed (not executed): it is the only redis replica, so it needs human approval"
+      }
+    ],
+    "recommended_actions": [
+      {
+        "action": "manual",
+        "component": "redis",
+        "rationale": "Restore the runtime maxmemory to the spec value 64mb, either with CONFIG SET maxmemory 67108864 on the running redis (keeps the data) or by restarting the pod, which reloads --maxmemory 64mb from the deployment args. The restart proposal (restart_pod on redis-7d9d88cc-lnhpm) is pending human approval because redis has a single replica. Afterwards, confirm redis_config_maxmemory = 67108864, inventory cache writes succeed, and the hit ratio returns to about 80%+. Also find out who ran CONFIG SET, and consider blocking runtime CONFIG changes (rename-command CONFIG) or alerting on redis_config_maxmemory drift from the spec."
+      }
+    ]
+  },
+  "cited_calls": [
+    {
+      "call_id": "c1",
+      "tool": "query_metrics",
+      "input": {
+        "promql": "sum by (result) (rate(inventory_cache_requests_total[1m]))",
+        "minutes": 30
+      }
+    },
+    {
+      "call_id": "c4",
+      "tool": "search_logs",
+      "input": {
+        "logql": "{k8s_namespace_name=\"testbed\", k8s_container_name=~\"inventory.*|redis.*\"} | detected_level=~\"error|warn\"",
+        "minutes": 30,
+        "limit": 40
+      }
+    },
+    {
+      "call_id": "c8",
+      "tool": "kube_get",
+      "input": {
+        "kind": "deployments",
+        "name": "redis",
+        "label_selector": "",
+        "output": "yaml"
+      }
+    },
+    {
+      "call_id": "c9",
+      "tool": "query_metrics",
+      "input": {
+        "promql": "redis_config_maxmemory",
+        "minutes": 360
+      }
+    },
+    {
+      "call_id": "c10",
+      "tool": "search_logs",
+      "input": {
+        "logql": "{k8s_namespace_name=\"testbed\", k8s_pod_name=~\"redis.*\"}",
+        "minutes": 60,
+        "limit": 40
+      }
+    },
+    {
+      "call_id": "c12",
+      "tool": "query_metrics",
+      "input": {
+        "promql": "sum(rate(redis_commands_total[1m])) by (cmd)",
+        "minutes": 30
+      }
+    },
+    {
+      "call_id": "c14",
+      "tool": "query_metrics",
+      "input": {
+        "promql": "sum(rate(http_server_requests_total{code=~\"5..\"}[2m])) / sum(rate(http_server_requests_total[2m]))",
+        "minutes": 30
+      }
+    }
+  ],
+  "actions": [
+    {
+      "action": "restart_pod",
+      "input": {
+        "pod": "redis-7d9d88cc-lnhpm",
+        "reason": "Redis maxmemory was lowered at runtime via CONFIG SET to 1048576 (1 MB) at 05:17:23 (call c10 log: 'new maxmemory value set via CONFIG SET (1048576) is smaller than current memory usage (1439032)'; call c9 shows redis_config_maxmemory went 67108864 -> 1048576 at 05:21). Deployment args still say --maxmemory 64mb (call c8). inventory-service cache writes fail with OOM (call c4), hit ratio dropped to 0 (call c1). Restarting the pod resets the runtime config to the 64mb from the deployment args."
+      },
+      "decision": "proposed",
+      "reason": "recorded for a human operator; not executed",
+      "step": null,
+      "target": "pod/redis-7d9d88cc-lnhpm",
+      "summary": "delete pod/redis-7d9d88cc-lnhpm so that deployment/redis replaces it with a new pod",
+      "risk": "high",
+      "risk_reason": "this is the only available replica: the component is down until its replacement is ready",
+      "command": [
+        "--namespace",
+        "testbed",
+        "delete",
+        "pod",
+        "redis-7d9d88cc-lnhpm",
+        "--wait=false"
+      ],
+      "diff": "- pod/redis-7d9d88cc-lnhpm\n  (deployment/redis creates a replacement)",
+      "approved_by": null,
+      "verified": null
+    }
+  ],
+  "run": {
+    "model": "claude-haiku-5-5",
+    "effort": "medium",
+    "policy_mode": "auto",
+    "started_at": "2026-11-16T05:20:55.405474Z",
+    "duration_seconds": 39.70107408298645,
+    "outcome": "report",
+    "outcome_detail": "report accepted",
+    "model_requests": 8,
+    "tool_calls": 14,
+    "tool_errors": 1,
+    "refused_tool_calls": 0,
+    "rejected_submissions": 0,
+    "write_actions": {
+      "executed": 0,
+      "proposed": 1,
+      "declined": 0,
+      "rejected": 0,
+      "failed": 0
+    },
+    "input_tokens": 18,
+    "cache_write_tokens": 26378,
+    "cache_read_tokens": 125224,
+    "output_tokens": 5045,
+    "cost_usd": 0.00707379,
+    "price_source": "https://platform.claude.com/docs/en/about-claude/pricing.md",
+    "price_retrieved": "2026-11-10"
+  }
+}

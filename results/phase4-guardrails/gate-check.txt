@@ -1,0 +1,176 @@
+# The write gate against the live cluster, 2026-11-16T04:47:11Z
+# Reads as oncall-agent-observer, dry runs and changes as oncall-agent-operator.
+
+# Part 1: propose mode, nobody to approve. Nothing below changes the cluster.
+# Each call gets a fresh gate, as one run would, so the budget does not interfere.
+
+## rollback_deployment(deployment='order-service')
+    trace record written before any change: write_dry_run (deployment/order-service)
+    decision: proposed
+    reason:   recorded for a human operator; not executed
+    risk:     medium (replaces every pod of the Deployment with a different pod template, which helps only if the diagnosis is right)
+    diff:
+      --- /spec/template (now)
+      +++ /spec/template (after the change, from a server dry run)
+      @@ -13,7 +13,7 @@
+           - name: INVENTORY_SERVICE_ADDR
+             value: dns:///inventory-service.testbed.svc.cluster.local:9000
+           - name: INVENTORY_TIMEOUT
+      -      value: 1ms
+      +      value: 1s
+           - name: NATS_URL
+             value: nats://nats.testbed.svc.cluster.local:4222
+           - name: PUBLISH_TIMEOUT
+
+## revert_config(deployment='order-service', settings=['INVENTORY_TIMEOUT'])
+    trace record written before any change: write_dry_run (deployment/order-service)
+    decision: proposed
+    reason:   recorded for a human operator; not executed
+    risk:     medium (replaces every pod of the Deployment with a different pod template, which helps only if the diagnosis is right)
+    diff:
+      --- /spec/template/spec/containers/0 (now)
+      +++ /spec/template/spec/containers/0 (after the change, from a server dry run)
+      @@ -4,7 +4,7 @@
+       - name: INVENTORY_SERVICE_ADDR
+         value: dns:///inventory-service.testbed.svc.cluster.local:9000
+       - name: INVENTORY_TIMEOUT
+      -  value: 1ms
+      +  value: 1s
+       - name: NATS_URL
+         value: nats://nats.testbed.svc.cluster.local:4222
+       - name: PUBLISH_TIMEOUT
+
+## revert_config(deployment='order-service', settings=['DB_MAX_CONNS'])
+    decision: rejected at the allow_list check
+    reason:   DB_MAX_CONNS: the same in revision 7 and 8, so the last rollout did not change it. revert_config only sets back what the last rollout changed.
+
+## revert_config(deployment='order-service', settings=['DB_PASSWORD'])
+    decision: rejected at the allow_list check
+    reason:   DB_PASSWORD is set from a Secret or ConfigMap reference, not a value; revert_config does not change references
+
+## scale_deployment(deployment='order-service', replicas=3)
+    trace record written before any change: write_dry_run (deployment/order-service)
+    decision: proposed
+    reason:   recorded for a human operator; not executed
+    risk:     low (adds replicas; the pods that are running are not touched)
+    diff:
+      --- /spec/replicas (now)
+      +++ /spec/replicas (after the change, from a server dry run)
+      @@ -1 +1 @@
+      -2
+      +3
+
+## restart_pod(pod='redis-7d9d88cc-lnhpm')
+    trace record written before any change: write_dry_run (pod/redis-7d9d88cc-lnhpm)
+    decision: proposed
+    reason:   recorded for a human operator; not executed
+    risk:     high (this is the only available replica: the component is down until its replacement is ready)
+    diff:
+      - pod/redis-7d9d88cc-lnhpm
+        (deployment/redis creates a replacement)
+
+## rollback_deployment(deployment='postgres')
+    decision: rejected at the allow_list check
+    reason:   rollback_deployment may only act on api-gateway, inventory-service, notification-worker, order-service; not on postgres: its data is on an emptyDir volume, so a new pod starts with an empty database
+
+## rollback_deployment(deployment='api-gateway')
+    decision: rejected at the allow_list check
+    reason:   deployment/api-gateway has no revision before 5 to go back to
+
+## scale_deployment(deployment='order-service', replicas=0)
+    decision: rejected at the allow_list check
+    reason:   replicas must be between 1 and 3, not 0
+
+## scale_deployment(deployment='redis', replicas=2)
+    decision: rejected at the allow_list check
+    reason:   scale_deployment may only act on api-gateway, inventory-service, notification-worker, order-service; not on redis: it runs as a single instance; only restarting its pod is allowed
+
+## restart_pod(pod='postgres-848d8b5984-lnszv')
+    decision: rejected at the allow_list check
+    reason:   restart_pod may only act on api-gateway, inventory-service, notification-worker, order-service, redis; not on postgres: its data is on an emptyDir volume, so a new pod starts with an empty database
+
+## restart_pod(pod='no-such-pod')
+    decision: rejected at the scope check
+    reason:   there is no pod named no-such-pod in namespace testbed
+
+## rollback_deployment(deployment='kube-dns')
+    decision: rejected at the scope check
+    reason:   there is no Deployment named kube-dns in namespace testbed
+
+# The budget: one gate, a fourth write after three proposals.
+
+## scale_deployment(deployment='order-service', replicas=3)
+    trace record written before any change: write_dry_run (deployment/order-service)
+    decision: proposed
+    reason:   recorded for a human operator; not executed
+    risk:     low (adds replicas; the pods that are running are not touched)
+    diff:
+      --- /spec/replicas (now)
+      +++ /spec/replicas (after the change, from a server dry run)
+      @@ -1 +1 @@
+      -2
+      +3
+
+## scale_deployment(deployment='inventory-service', replicas=3)
+    trace record written before any change: write_dry_run (deployment/inventory-service)
+    decision: proposed
+    reason:   recorded for a human operator; not executed
+    risk:     low (adds replicas; the pods that are running are not touched)
+    diff:
+      --- /spec/replicas (now)
+      +++ /spec/replicas (after the change, from a server dry run)
+      @@ -1 +1 @@
+      -2
+      +3
+
+## scale_deployment(deployment='api-gateway', replicas=3)
+    trace record written before any change: write_dry_run (deployment/api-gateway)
+    decision: proposed
+    reason:   recorded for a human operator; not executed
+    risk:     low (adds replicas; the pods that are running are not touched)
+    diff:
+      --- /spec/replicas (now)
+      +++ /spec/replicas (after the change, from a server dry run)
+      @@ -1 +1 @@
+      -2
+      +3
+
+## scale_deployment(deployment='notification-worker', replicas=2)
+    decision: rejected at the budget check
+    reason:   this run has used its 3 write actions
+    risk:     low (adds replicas; the pods that are running are not touched)
+
+# Part 2: auto mode. Two low-risk writes are executed.
+
+## scale_deployment(deployment='notification-worker', replicas=2)
+    trace record written before any change: write_dry_run (deployment/notification-worker)
+    decision: executed
+    reason:   deployment/notification-worker now has the new replicas
+    risk:     low (adds replicas; the pods that are running are not touched)
+    by:       auto mode: low risk; verified: True
+    diff:
+      --- /spec/replicas (now)
+      +++ /spec/replicas (after the change, from a server dry run)
+      @@ -1 +1 @@
+      -1
+      +2
+
+## restart_pod(pod='api-gateway-7674946656-5czpt')
+    trace record written before any change: write_dry_run (pod/api-gateway-7674946656-5czpt)
+    decision: executed
+    reason:   pod/api-gateway-7674946656-5czpt is being deleted; deployment/api-gateway is replacing it
+    risk:     low (1 other available replica(s) keep serving while the Deployment replaces this pod)
+    by:       auto mode: low risk; verified: True
+    diff:
+      - pod/api-gateway-7674946656-5czpt
+        (deployment/api-gateway creates a replacement)
+
+## scale_deployment(deployment='api-gateway', replicas=1)
+    decision: rejected at the budget check
+    reason:   a change to deployment/api-gateway has already been executed in this run; check its effect before anything else is changed there
+    risk:     high (removes replicas, and with them capacity, during an incident)
+
+## scale_deployment(deployment='notification-worker', replicas=3)
+    decision: rejected at the budget check
+    reason:   a change to deployment/notification-worker has already been executed in this run; check its effect before anything else is changed there
+    risk:     low (adds replicas; the pods that are running are not touched)

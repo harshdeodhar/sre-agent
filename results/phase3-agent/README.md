@@ -109,6 +109,15 @@ not been changed since. Runs 2 to 4 used identical code.
   (`MODEL` defaults to `claude-haiku-5-5`, effort `medium`), then
   `make cleanup INCIDENT=<id>`, then `make healthy`.
 
+## Since Phase 4
+
+These runs were made in observe mode before the write tools existed. Observe
+mode still sends the same system prompt and tools byte for byte, so the traces
+still replay record for record (`tests/agent/test_replay.py`). From Phase 4,
+`report.json` also lists the write actions; the report files here are in the
+Phase 3 format, as the code of commit `a3666ba` wrote them, and are left as
+they were.
+
 ## Reproducing
 
 Offline, with no API key and no cluster:

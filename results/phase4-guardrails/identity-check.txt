@@ -1,0 +1,55 @@
+# The agent's write identity (oncall-agent-operator), asked of the live API server.
+# 2026-11-16T04:44:51Z, Kubernetes v1.33.6+k3s1
+
+## kubectl auth can-i
+
+patch deployment/order-service -n testbed                  yes
+patch deployment/api-gateway -n testbed                    yes
+patch deployment/postgres -n testbed                       no
+patch deployment/redis -n testbed                          no
+patch deployments -n testbed (any name)                    no
+update deployment/order-service -n testbed                 no
+patch deployments/order-service --subresource=scale        no
+delete pods -n testbed                                     yes
+get pods -n testbed                                        no
+get secrets -n testbed                                     no
+create pods -n testbed                                     no
+create pods --subresource=exec -n testbed                  no
+delete deployments -n testbed                              no
+patch configmaps -n testbed                                no
+delete pods -n observability                               no
+delete pods -n chaos                                       no
+patch deployments -n kube-system                           no
+
+## Writes sent straight to the API server with this identity (all --dry-run=server)
+
+# allowed: scale order-service to 3
+$ kubectl --namespace testbed patch deployment order-service --type=json -p [{"op":"replace","path":"/spec/replicas","value":3}] --dry-run=server -o name
+deployment.apps/order-service
+
+# blocked by admission: scale order-service to 0
+$ kubectl --namespace testbed patch deployment order-service --type=json -p [{"op":"replace","path":"/spec/replicas","value":0}] --dry-run=server -o name
+The deployments "order-service" is invalid: : ValidatingAdmissionPolicy 'oncall-agent-operator' with binding 'oncall-agent-operator' denied request: the agent may only give a Deployment between 1 and 3 replicas
+
+# blocked by admission: scale order-service to 4
+$ kubectl --namespace testbed patch deployment order-service --type=json -p [{"op":"replace","path":"/spec/replicas","value":4}] --dry-run=server -o name
+The deployments "order-service" is invalid: : ValidatingAdmissionPolicy 'oncall-agent-operator' with binding 'oncall-agent-operator' denied request: the agent may only give a Deployment between 1 and 3 replicas
+
+# blocked by RBAC: patch the postgres Deployment
+$ kubectl --namespace testbed patch deployment postgres --type=json -p [{"op":"replace","path":"/spec/replicas","value":1}] --dry-run=server -o name
+Error from server (Forbidden): deployments.apps "postgres" is forbidden: User "system:serviceaccount:testbed:oncall-agent-operator" cannot get resource "deployments" in API group "apps" in the namespace "testbed"
+
+# blocked by RBAC: delete a pod in observability
+$ kubectl --namespace observability delete pod prometheus-does-not-matter --dry-run=server
+Error from server (Forbidden): pods "prometheus-does-not-matter" is forbidden: User "system:serviceaccount:testbed:oncall-agent-operator" cannot delete resource "pods" in API group "" in the namespace "observability"
+
+# The next two need a pod name, which this identity cannot list; it was looked up as the
+# administrator.
+
+# allowed: delete an order-service pod
+$ kubectl --namespace testbed delete pod order-service-c778f8c59-2vbgz --wait=false --dry-run=server
+pod "order-service-c778f8c59-2vbgz" deleted from testbed namespace (server dry run)
+
+# blocked by admission: delete the postgres pod
+$ kubectl --namespace testbed delete pod postgres-848d8b5984-lnszv --wait=false --dry-run=server
+The pods "postgres-848d8b5984-lnszv" is invalid: : ValidatingAdmissionPolicy 'oncall-agent-operator' with binding 'oncall-agent-operator' denied request: the agent may only delete pods of the four services and of redis
