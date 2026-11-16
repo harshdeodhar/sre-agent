@@ -80,7 +80,7 @@ Added as phases land; do not document a target here until it exists and works.
 | `make cleanup INCIDENT=<id>` | Undo one incident |
 | `make incident-check INCIDENT=<id>` | Inject, confirm the fault shows in telemetry, clean up, confirm recovery (`INCIDENT=--all` for every one, `OUT=<dir>` for the records) |
 | `make healthy` | Report whether the testbed is at its manifest state with no alert pending or firing |
-| `make agent` | Investigate the alerts firing now, read-only (`MODEL=<id>`, default `claude-haiku-5-5`; `ARGS="--wait 300"` to wait for an alert). Calls the API: needs `ANTHROPIC_API_KEY` in the environment or in `.env` |
+| `make agent` | Investigate the alerts firing now (`MODEL=<id>`, default `claude-haiku-5-5`; `MODE=observe\|propose\|auto`, default `observe`; `ARGS="--wait 300"` to wait for an alert, `ARGS=--approve` to be asked on the terminal before a proposal is executed). Calls the API: needs `ANTHROPIC_API_KEY` in the environment or in `.env` |
 | `make agent-replay TRACE=<file>` | Re-run the loop from a recorded `trace.jsonl`, with no API key and no cluster |
 | `make agent-kubeconfig` | Write `agent-observer.kubeconfig`, the agent's read-only cluster identity |
 | `make dashboards` | Regenerate the Grafana dashboard JSON from `generate.py` |
@@ -96,11 +96,16 @@ its history. Export anything a document quotes to `results/` first.
 After changing a model in `src/oncall/chaos/incident.py`, regenerate the schema:
 `uv run python -m oncall.chaos schema --write`.
 
-The traces under `results/phase3-agent/` are replayed by the unit tests. A
-change to what the loop sends to the model (the text of a tool result, a
-rejection message, a new check on a report) makes them stop replaying. Do not
-edit a trace to fit: record new runs, and move the old ones aside with a note,
-as `results/phase3-agent/before-markup-check/` does.
+The traces under `results/phase3-agent/` and `results/phase4-guardrails/` are
+replayed by the unit tests. A change to what the loop sends to the model (the
+text of a tool result, a rejection message, a new check on a report, the
+observe-mode prompt or tools) makes them stop replaying. Do not edit a trace to
+fit: record new runs, and move the old ones aside with a note, as
+`results/phase3-agent/before-markup-check/` does.
+
+The approval step of `propose` mode is for a human. Do not answer it on the
+user's behalf (piping "y" into `--approve`); unit tests cover that path with a
+scripted approver.
 
 ## Conventions
 

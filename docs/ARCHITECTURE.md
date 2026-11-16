@@ -1,8 +1,9 @@
 # Architecture
 
-> **Status: Phases 1 to 3 built** (testbed, observability, load generator; the
-> first 8 incidents with inject and cleanup; the agent in `observe` mode). The
-> write tools, the guardrail gate and the evaluation harness are still design.
+> **Status: Phases 1 to 4 built** (testbed, observability, load generator; the
+> first 8 incidents with inject and cleanup; the agent with read-only tools,
+> and its write tools behind a guardrail gate in `propose` and `auto` mode).
+> The evaluation harness is still design.
 > Each section is updated when its phase lands, and anything marked "to verify"
 > is an assumption that a later phase must confirm by running it.
 
@@ -242,7 +243,10 @@ and not a guarantee, as Tempo shows below.
   It returned at 20:11 after a burst of commands on the host, with nothing
   injected, and cleared by itself at 20:22. The agent runs in
   `results/phase3-agent/` were made in the healthy window in between, each
-  after `make healthy` passed. *For Phase 5:* the harness must refuse to inject
+  after `make healthy` passed. It happened again in Phase 4
+  ([data](../results/phase4-guardrails/cluster-health.json)): 04:49 to 05:06
+  UTC on 2026-11-16, with nothing injected and 19 GB of swap in use, p95 up
+  to 7.5 s and up to 47% errors. *For Phase 5:* the harness must refuse to inject
   into an unhealthy cluster, and a full benchmark needs the browser closed.
 - *Tempo is the tightest fit.* It stores very little data at this load, but
   writing and compacting its Parquet blocks allocates memory in bursts: those
@@ -401,8 +405,8 @@ things from those runs matter for later phases:
 ## Agent
 
 > **Built in Phase 3:** the loop, the read-only tools, the report, the trace and
-> its replay, all in `observe` mode. **Still design (Phase 4):** the write tools,
-> the guardrail gate and the `propose` and `auto` modes.
+> its replay, all in `observe` mode. **Built in Phase 4:** the four write tools,
+> the guardrail gate, the write identity, and the `propose` and `auto` modes.
 
 | Module (`src/oncall/agent/`) | What it holds |
 |---|---|
@@ -410,16 +414,17 @@ things from those runs matter for later phases:
 | `llm.py` | The only code that talks to the Anthropic API |
 | `prompt.py`, `page.py` | What the model is told: the system prompt, and the alert that paged it |
 | `tools/` | The read-only tools, one file per backend |
+| `guardrails/` | The write tools, the policy that limits them, and the gate every write passes through |
 | `report.py` | The `submit_report` schema, the checks on a submission, the Markdown rendering |
 | `trace.py`, `replay.py` | The JSONL trace, and running the loop again from one |
 | `pricing.py` | The price table and the cost of a request |
-| `identity.py` | The read-only kubeconfig the tools run with |
+| `identity.py` | The kubeconfigs of the agent's two cluster identities |
 | `runner.py`, `cli.py` | One investigation from page to files; the command line |
 
 **Loop.** A hand-written tool-use loop over the Anthropic Messages API (official
 Python SDK). Hand-written rather than the SDK's tool runner because the loop is
-where limits, tracing, and (from Phase 4) the write gate live, and those need to
-be code I can point at and test. Each turn sends the whole conversation; the
+where limits and tracing live, and the write gate sits directly behind it; those
+need to be code I can point at and test. Each turn sends the whole conversation; the
 reply is appended exactly as it arrived (thinking blocks included), the tools it
 asked for are run, and their results go back as one user message. Nothing in
 the conversation is ever edited, which is what lets the API cache the prefix.
@@ -447,7 +452,7 @@ builds the argument list and runs it without a shell. The namespace is not a
 parameter: it is always `testbed`. Resource kinds are a closed list without
 Secrets.
 
-| Read-only (built) | Write (Phase 4, gated) |
+| Read-only (every mode) | Write (`propose` and `auto` only, through the gate) |
 |---|---|
 | `query_metrics` (PromQL, instant or range), `list_metrics` | `rollback_deployment` |
 | `search_logs` (LogQL) | `scale_deployment` |
@@ -482,37 +487,129 @@ Outcomes: `report`, `report_rejected`, `no_tool_call`, `max_tokens`, `refusal`,
 `cost_limit`, `model_error`. Only the first produces a report to score; the
 benchmark will count the others as failures, not drop them.
 
-**Guardrails are enforced twice.** (Phase 4 design; the read-only identity
-below is built.)
+**Write actions.** Four, named after the taxonomy's remediation actions so a
+recommendation in a report and a tool call use the same word
+([`guardrails/actions.py`](../src/oncall/agent/guardrails/actions.py)):
 
-*In code*, every write request passes through one function, in this order. Any
-step can reject, and every rejection is recorded and counted in the benchmark:
+| Tool | What it changes | Allowed on |
+|---|---|---|
+| `rollback_deployment` | The pod template becomes the previous revision's, as `kubectl rollout undo` does | the four services |
+| `revert_config` | Named settings of the container (environment variables with a literal value, CPU and memory requests and limits) go back to the previous revision's values; everything else the last rollout changed stays | the four services |
+| `scale_deployment` | The replica count, 1 to 3 | the four services |
+| `restart_pod` | One pod is deleted; its Deployment replaces it | the four services and Redis |
 
-1. Schema validation of the parameters.
-2. Scope: namespace must be `testbed`; the target must be a known resource.
-3. Allow-list: the action and its parameter values must be explicitly permitted.
-4. Budget: write-action cap, tool-call cap, wall-clock cap.
-5. Policy mode:
-   - `observe` rejects all writes.
-   - `propose` records the action and its diff for a human to approve.
-   - `auto` executes only actions classified low-risk; the rest become proposals.
-6. Server-side dry run and diff, saved to the trace before anything executes.
-7. Execute, then re-read the resource to confirm the change applied.
+The stores are protected because of what they hold, not because of any
+incident. Postgres and NATS keep their data on `emptyDir`, so a new pod starts
+with an empty database or stream; none of the stores is built to run two
+replicas. Redis may be restarted because it is a cache. Three is the replica
+ceiling because each service replica has a 96 MiB limit and the cluster has to
+fit in 4 GB. Every name and number is in one file,
+[`guardrails/policy.py`](../src/oncall/agent/guardrails/policy.py).
 
-*In Kubernetes*, the agent uses its own ServiceAccount, never the
+Each action is a *planner*: from typed parameters and a read of the cluster it
+works out the exact change, a JSON patch replacing one field of one
+Deployment, or the deletion of one pod. A planner is given a read-only view
+of the cluster and nothing that can write (a test checks this). Doing
+rollbacks as an explicit patch, not `kubectl rollout undo`, is what lets the
+gate dry-run it, show its diff, and pin it to the version that was checked:
+the patch starts with a JSON-patch `test` of the Deployment's
+`metadata.generation`, so a Deployment that someone else changed while a
+proposal waited for approval makes the patch fail instead of being
+overwritten.
+
+**Guardrails are enforced twice.**
+
+*In code*, every write goes through one function,
+[`WriteGate.submit`](../src/oncall/agent/guardrails/gate.py), in this order.
+The first check that fails rejects the write; nothing in the cluster is
+touched by a rejected write, not even a dry run.
+
+| Step | Rejects when |
+|---|---|
+| 1. schema | the parameters have the wrong types or an unknown field |
+| 2. scope | the name is not a valid object name, or no such Deployment or pod exists in `testbed`, or the pod has no Deployment that would replace it |
+| 3. allow-list | the action may not touch that target, a value is out of range, there is no earlier revision, a setting did not change in the last rollout or is a Secret reference, or the change would do nothing |
+| 4. budget | 3 writes have reached a dry run in this run; a change to this Deployment was already executed in this run; the same proposal was already made |
+| 5. policy | the mode is `observe` |
+| 6. dry run | the API server refuses the change (RBAC or admission), or it would change nothing. The diff is written to the trace before step 7 |
+| 7. decision | `auto` and low risk: execute. Otherwise ask the approver; with no approver the write stays a proposal |
+| 8. execute | then read the object back as the observer and confirm the field has the value the dry run predicted |
+
+The tool-call and time budgets are the loop's: once they are used up, every
+tool call is refused before it reaches the gate. One executed change per
+Deployment per run exists because a second rollback would flip a Deployment
+back to the revision the first one left, and because the effect of a change
+should be seen before the next one.
+
+Every write tool call, whatever happened to it, produces an `ActionRecord`
+(decision, failed step, reason, risk, diff, kubectl arguments, who approved,
+whether it verified). The loop records it with the tool call in the trace,
+and it goes into `report.json` and `report.md` with counts per decision. A
+rejected write is never dropped.
+
+*Policy modes.*
+
+- `observe`: the agent gets no write tools at all, and its prompt and tools
+  are byte-identical to Phase 3's (a test compares them with a Phase 3
+  trace). The gate would reject a write anyway, and in this mode no identity
+  that can write is even created.
+- `propose`: every write that passes is dry-run and recorded as a proposal.
+  With `--approve`, the person at the terminal is shown the summary, risk,
+  the agent's reason and the diff, and answers y/N; without it, nothing is
+  executed. The agent's time budget keeps running while it waits.
+- `auto`: low-risk writes are executed without asking; everything else is
+  treated as in `propose`.
+
+*Risk*, decided in code from the plan
+([`policy.py`](../src/oncall/agent/guardrails/policy.py)). Low risk means the
+change keeps every replica's code and configuration, does not reduce the
+capacity that is left, and Kubernetes absorbs it on its own. Only that runs
+unattended.
+
+| Change | Risk |
+|---|---|
+| Scale up | low |
+| Restart a pod while another replica of its Deployment is available | low |
+| Rollback, config revert | medium: every pod is replaced, which helps only if the diagnosis is right |
+| Scale down | high: removes capacity during an incident |
+| Restart the last available replica (Redis, the notification worker) | high: the component is down until its replacement is ready |
+
+A consequence worth knowing for Phase 5: in `auto` mode, the fixes for most
+incidents in the library (a rollback or a config revert) are proposals, not
+executions. That follows from the classification, which was made from the
+nature of each change and not from the incidents.
+
+*In Kubernetes*, the agent uses its own ServiceAccounts, never the
 administrator's kubeconfig. If the code had a bug, the API server would still
-refuse.
+refuse. RBAC objects and admission policies cost no memory.
 
-- Built: `oncall-agent-observer` ([`deploy/rbac/`](../deploy/rbac/agent-observer.yaml)).
+- `oncall-agent-observer` ([`deploy/rbac/`](../deploy/rbac/agent-observer.yaml)).
   Its Role exists only in `testbed` and grants `get` and `list` on pods,
   services, endpoints, endpoint slices, configmaps, events, deployments and
   replicasets. No write verb, no Secrets, no `pods/log`, no `pods/exec`, no
-  `watch`, no other namespace, nothing cluster-scoped. Before each run the CLI
-  mints a one-hour token for it (`kubectl create token`, with the admin
-  kubeconfig) and writes `agent-observer.kubeconfig` with mode 0600; the tools
-  are given only that file. RBAC objects cost no memory.
-- Phase 4: a second identity with the few write verbs the write tools need,
-  used only in `propose` and `auto` modes.
+  `watch`, no other namespace, nothing cluster-scoped. Every read tool, and
+  every read the gate makes, runs as this account.
+- `oncall-agent-operator` ([`agent-operator.yaml`](../deploy/rbac/agent-operator.yaml)),
+  created only in `propose` and `auto` mode and given only to the gate. Its
+  Role allows `patch` (and `get`, which `kubectl patch` needs; found by running
+  it) on the four service Deployments by name, and `delete` on pods. RBAC
+  cannot name pods, whose names are generated, so a `ValidatingAdmissionPolicy`
+  (CEL, evaluated by the API server itself) narrows that to pods of the
+  allowed Deployments, and bounds every Deployment the account touches to 1 to
+  3 replicas. It applies to dry runs too, so a proposal the server would
+  refuse is never put to a human.
+- Before each run the CLI mints one-hour tokens for the accounts it needs
+  (`kubectl create token`, with the admin kubeconfig) and writes
+  `agent-observer.kubeconfig` and `agent-operator.kubeconfig` with mode 0600.
+  Both tokens are given to the trace writer as values it must refuse to write.
+  A test keeps the Role and the admission policy in step with `policy.py`.
+
+Checked against the live API server in Phase 4
+([`results/phase4-guardrails/`](../results/phase4-guardrails/README.md)): every
+write sent straight to the API server with the operator's identity, bypassing
+the gate, was refused when it should be: patching Postgres (RBAC), deleting a
+pod in another namespace (RBAC), deleting the Postgres pod (admission),
+scaling to 0 or 4 (admission).
 
 **Output.** The agent finishes by calling `submit_report`, whose strict schema is
 the report: summary, root causes (component, fault category, explanation,
@@ -585,6 +682,23 @@ change), one moving breakpoint at the end of the conversation.
   the nudge, and every outcome other than `report`. Those paths are covered by
   unit tests with scripted replies only.
 
+**Confirmed by the Phase 4 runs** (`claude-haiku-5-5`, 2026-11-16; traces in
+[`results/phase4-guardrails/`](../results/phase4-guardrails/README.md)):
+
+- The API accepts the write tools' strict schemas, and the model uses them as
+  intended: one proposal in propose mode (a one-variable revert rather than a
+  whole rollback), one low-risk scale-up executed by auto mode and then
+  watched for its effect, one high-risk Redis restart held back as a
+  proposal, and one run that found nothing and wrote nothing.
+- Measured cost with write tools: $0.0045 to $0.0161 per investigation (8 to
+  30 tool calls, 39 to 72 seconds). A run's first request, which writes the
+  tools, the system prompt and the page to the cache, wrote 7,596 to 7,846
+  tokens, against 6,306 to 6,331 in the observe-mode runs: the write tools
+  and their part of the prompt add roughly 1,300 to 1,500 tokens.
+- Not yet exercised by a live model: a write rejected by the gate, a human
+  approval or decline, and a failed or unverified write. They are covered by
+  unit tests and, for rejections, by a live run of the gate with no model.
+
 ## Evaluation harness
 
 For each incident: reset to healthy → inject → wait for the alert → run the
@@ -640,13 +754,13 @@ estimate, and the report will say so.
 │   ├── loadgen/
 │   ├── observability/       # Prometheus, Loki, Tempo, collector, Grafana,
 │   │                        # kube-state-metrics; config/ and dashboards/
-│   ├── rbac/                # the agent's read-only ServiceAccount and Role;
-│   │                        # (Phase 4) the write identity
+│   ├── rbac/                # the agent's two ServiceAccounts: read-only, and
+│   │                        # the write identity with its admission policy
 │   └── chaos/               # netem helper: manifest, image, script
 ├── incidents/               # one YAML per incident + JSON schema
 ├── src/oncall/              # Python package
-│   ├── agent/               # loop, llm client, tools/, report, trace, replay;
-│   │                        # (Phase 4) guardrails/
+│   ├── agent/               # loop, llm client, tools/, guardrails/, report,
+│   │                        # trace, replay
 │   ├── chaos/               # incident parsing, inject, cleanup, health,
 │   │                        # incident-check
 │   └── bench/               # harness, scoring, report generation, router
@@ -665,11 +779,14 @@ gRPC deadlines) are real ones.
 most complete, prompt and tool iteration is fastest there, and scoring reports
 with tables and charts are a few lines with pandas and matplotlib. The cost is
 two toolchains in one repo. Guardrails being in Python does not make them
-softer: they are ordinary functions with unit tests, backed by Kubernetes RBAC.
+softer: they are ordinary functions with unit tests, backed by Kubernetes RBAC
+and an admission policy.
 
 ## Open items (decided in the phase noted)
 
-- Risk classification of each write action for `auto` mode (Phase 4).
+- ~~Risk classification of each write action for `auto` mode (Phase 4).~~
+  Decided: see "Risk" under Agent. Only scale-ups and restarts of a
+  redundant replica run unattended.
 - Which policy mode the benchmark uses for recovery scoring, and whether
   `propose` mode is benchmarked with a scripted approver (Phase 5).
 - Which incidents form the fixed subset for expensive models, if the budget
