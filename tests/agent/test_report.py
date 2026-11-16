@@ -7,12 +7,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from oncall.agent.guardrails.policy import Policy, PolicyMode
+from oncall.agent.guardrails.record import ActionRecord, Decision, Step
 from oncall.agent.loop import CallRecord, Outcome, RunConfig, RunResult
 from oncall.agent.pricing import PRICE_RETRIEVED, PRICE_SOURCE
 from oncall.agent.replay import ReplayMismatchError, replay
 from oncall.agent.report import Submission, check_submission, render_markdown
 from oncall.agent.runner import build_report, report_json
-from oncall.agent.tools import read_only_definitions
 from oncall.agent.trace import read_trace
 
 from .conftest import REPO
@@ -137,7 +138,7 @@ def test_a_trace_recorded_before_the_markup_check_no_longer_replays() -> None:
     has no further response to give.
     """
     with pytest.raises(ReplayMismatchError, match="a model request the trace does not contain"):
-        replay(read_trace(BEFORE_MARKUP_CHECK), read_only_definitions())
+        replay(read_trace(BEFORE_MARKUP_CHECK))
 
 
 @pytest.mark.parametrize(
@@ -237,3 +238,74 @@ def test_the_markdown_of_a_run_without_a_report_says_so() -> None:
 def test_the_markdown_of_a_report_without_a_cause() -> None:
     report = build_report("the page", CONFIG, result(submission(root_causes=[])), STARTED)
     assert "No root cause was established." in render_markdown(report)
+
+
+# ---- Write actions in the report -------------------------------------------------------
+
+
+def _action(decision: Decision, step: Step | None = None, **fields: Any) -> ActionRecord:  # noqa: ANN401
+    return ActionRecord(
+        action="rollback_deployment",
+        input={"deployment": "order-service", "reason": "c2 shows the change"},
+        decision=decision,
+        reason=fields.pop("reason", "why"),
+        step=step,
+        **fields,
+    )
+
+
+def _with_actions(*actions: ActionRecord, report: Submission | None = None) -> RunResult:
+    run = result(report)
+    run.calls = [
+        *run.calls,
+        *(
+            CallRecord(f"c{4 + n}", action.action, action.input, False, action)
+            for n, action in enumerate(actions)
+        ),
+    ]
+    return run
+
+
+PROPOSE = RunConfig(model="claude-haiku-5-5", policy=Policy(mode=PolicyMode.PROPOSE))
+
+
+def test_every_write_is_in_the_report_whatever_the_gate_decided() -> None:
+    actions = [
+        _action(Decision.REJECTED, Step.ALLOW_LIST, reason="not on postgres"),
+        _action(Decision.PROPOSED, target="deployment/order-service", diff="-a\n+b"),
+        _action(Decision.EXECUTED, approved_by="a human", verified=True),
+    ]
+    report = build_report("the page", PROPOSE, _with_actions(*actions), STARTED)
+    assert report.actions == actions
+    assert report.run.policy_mode == "propose"
+    assert report.run.write_actions.model_dump() == {
+        "executed": 1,
+        "proposed": 1,
+        "declined": 0,
+        "rejected": 1,
+        "failed": 0,
+    }
+    markdown = render_markdown(report)
+    assert "Policy mode: `propose`." in markdown
+    assert "   - Rejected at the `allow_list` check: not on postgres" in markdown
+    assert "   ```diff\n   -a\n   +b\n   ```" in markdown
+    assert "| Write actions | 1 executed, 1 proposed, 0 declined, 1 rejected, 0 failed |" in (
+        markdown
+    )
+
+
+def test_writes_are_reported_even_when_the_run_ended_without_a_report() -> None:
+    """A change made to the cluster is in the report whether or not the model filed one."""
+    executed = _action(Decision.EXECUTED, approved_by="auto mode: low risk", verified=True)
+    report = build_report("the page", PROPOSE, _with_actions(executed), STARTED)
+    markdown = render_markdown(report)
+    assert "## No report was submitted" in markdown
+    assert "1. **executed**" in markdown
+
+
+def test_an_observe_run_says_nothing_was_changed() -> None:
+    report = build_report("the page", CONFIG, result(submission("c1")), STARTED)
+    assert report.actions == []
+    assert "Policy mode was `observe`: nothing in the cluster was changed." in (
+        render_markdown(report)
+    )

@@ -110,3 +110,47 @@ def test_processes_and_sockets_are_opened_in_one_place_each(path: Path) -> None:
 
 def test_kubectl_is_never_run_through_a_shell() -> None:
     assert "shell=" not in (REPO / "src" / "oncall" / "chaos" / "kubectl.py").read_text()
+
+
+# kubectl subcommands (and `rollout` sub-subcommands) that change something.
+WRITE_VERBS = {
+    "annotate", "apply", "attach", "autoscale", "cordon", "cp", "create", "debug", "delete",
+    "drain", "edit", "exec", "expose", "label", "patch", "pause", "replace", "restart", "resume",
+    "run", "scale", "set", "taint", "uncordon", "undo",
+}  # fmt: skip
+# Where a write verb may appear in a kubectl argument list, and why.
+WRITES_ALLOWED_IN = {
+    # The gate: the one place a change is made.
+    "guardrails/gate.py": {"patch", "delete"},
+    # `create token`, run with the administrator's kubeconfig before the
+    # agent starts, to mint the agent's own short-lived tokens.
+    "identity.py": {"create"},
+}
+
+
+@pytest.mark.parametrize("path", SOURCES, ids=lambda p: str(p.relative_to(AGENT)))
+def test_only_the_gate_puts_a_write_verb_on_a_kubectl_command_line(path: Path) -> None:
+    """Every kubectl argument list in the agent is a list literal; check them all."""
+    relative = str(path.relative_to(AGENT))
+    verbs = {
+        element.value
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.List)
+        for element in node.elts
+        if isinstance(element, ast.Constant) and element.value in WRITE_VERBS
+    }
+    assert verbs <= WRITES_ALLOWED_IN.get(relative, set()), f"{relative}: {sorted(verbs)}"
+
+
+def test_the_write_actions_hold_no_way_to_write() -> None:
+    """A planner gets a ClusterView, which only reads; it never sees a kubectl runner."""
+    tree = ast.parse((AGENT / "guardrails" / "actions.py").read_text())
+    planners = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("plan_")
+    ]
+    assert len(planners) == 4
+    for planner in planners:
+        annotations = [ast.unparse(arg.annotation) for arg in planner.args.args if arg.annotation]
+        assert annotations[1:] == ["ClusterView"], planner.name

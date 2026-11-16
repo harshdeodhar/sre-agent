@@ -16,6 +16,10 @@ How a run goes:
    the checks, or when a limit or an API stop reason ends it. Every way a run
    can end is a value of `Outcome`.
 
+The loop does not know which tools write. A write tool's outcome carries the
+gate's decision (guardrails/gate.py); the loop records it with the call, so a
+rejected write is traced and counted like any other.
+
 Limits come in two kinds. Soft limits (tool calls, time, conversation size)
 stop further investigation but still let the model file a report from what it
 has: the tools refuse and say why. Hard limits (model requests, cost) end the
@@ -30,9 +34,11 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from oncall.agent.guardrails.policy import Policy
+from oncall.agent.guardrails.record import ActionRecord
 from oncall.agent.llm import ModelClient, ModelError, Response
 from oncall.agent.pricing import request_cost
-from oncall.agent.prompt import SYSTEM_PROMPT
+from oncall.agent.prompt import system_prompt
 from oncall.agent.report import (
     SUBMIT_REPORT,
     Submission,
@@ -86,6 +92,9 @@ class RunConfig:
     effort: str = "medium"
     max_tokens: int = 8000
     limits: Limits = Limits()
+    # What the agent may change. Decides the system prompt and the tools;
+    # the gate enforces it.
+    policy: Policy = Policy()
 
 
 @dataclass(frozen=True)
@@ -94,6 +103,8 @@ class CallRecord:
     tool: str
     input: dict[str, Any]
     is_error: bool
+    # Set for a write tool call: the gate's decision.
+    action: ActionRecord | None = None
 
 
 @dataclass
@@ -111,6 +122,11 @@ class RunResult:
     output_tokens: int
     cost_usd: float
     duration_seconds: float
+
+    @property
+    def actions(self) -> list[ActionRecord]:
+        """Every write the model attempted, in order, whatever the gate decided."""
+        return [call.action for call in self.calls if call.action is not None]
 
 
 class Trace(Protocol):
@@ -155,8 +171,10 @@ class Agent:
         self._tools = tools
         self._trace = trace
         self._elapsed = elapsed
+        mode = config.policy.mode
+        self._system = system_prompt(mode)
         # Fixed order: investigation tools first, the report tool last.
-        self._tool_definitions = [*tools.definitions(), submit_report_definition()]
+        self._tool_definitions = [*tools.definitions(), submit_report_definition(mode)]
 
     def run(self, page: str) -> RunResult:
         state = _State(messages=[{"role": "user", "content": page}])
@@ -166,7 +184,7 @@ class Agent:
             effort=self._config.effort,
             max_tokens=self._config.max_tokens,
             limits=asdict(self._limits),
-            system=SYSTEM_PROMPT,
+            system=self._system,
             tools=self._tool_definitions,
             page=page,
         )
@@ -302,7 +320,7 @@ class Agent:
             "model": self._config.model,
             "max_tokens": self._config.max_tokens,
             "system": [
-                {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
+                {"type": "text", "text": self._system, "cache_control": {"type": "ephemeral"}}
             ],
             "tools": self._tool_definitions,
             "messages": messages,
@@ -349,7 +367,12 @@ class Agent:
             call_id = f"c{len(state.calls) + 1}"
             started = time.monotonic()
             outcome = self._tools.call(block.name, block.input)
-            state.calls.append(CallRecord(call_id, block.name, block.input, outcome.is_error))
+            state.calls.append(
+                CallRecord(call_id, block.name, block.input, outcome.is_error, outcome.action)
+            )
+            # A read tool's record has no `action` field at all, so the records
+            # of an observe-mode run are what they were before write tools existed.
+            action = {"action": outcome.action.model_dump(mode="json")} if outcome.action else {}
             self._trace.write(
                 "tool_call",
                 call_id=call_id,
@@ -359,6 +382,7 @@ class Agent:
                 is_error=outcome.is_error,
                 duration_s=round(time.monotonic() - started, 3),
                 output=outcome.text,
+                **action,
             )
             # The header gives the model the ID to cite and its remaining budget.
             header = (

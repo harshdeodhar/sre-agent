@@ -10,12 +10,18 @@ and a single changed character (a timestamp, a run ID) would make every
 request pay full price again. Anything that varies goes into the page, which
 is the first user message (page.py).
 
+The one part that depends on the policy mode is the "Access" section: what
+the agent can change and what happens when it tries. In observe mode it is
+the text the Phase 3 runs were given, unchanged, so observe mode is the agent
+those runs measured (tests/agent/test_page_prompt.py checks this).
+
 The fault categories and the rules for choosing a (component, category) pair
 are the scoring rubric's own text (docs/RUBRIC.md): the agent is told how a
 cause must be expressed in the same words as the people who wrote the ground
 truth. tests/agent/test_page_prompt.py keeps the two in step.
 """
 
+from oncall.agent.guardrails.policy import MAX_REPLICAS, PolicyMode
 from oncall.chaos.taxonomy import CATEGORY_DEFINITIONS, Component
 
 # "Choosing the pair" from docs/RUBRIC.md, without the Markdown emphasis.
@@ -31,17 +37,58 @@ CHOOSING_RULES = (
     "the broken component.",
 )
 
-_INTRODUCTION = """\
+_OPENING = """\
 You are the on-call engineer for a small e-commerce backend that runs in the \
 Kubernetes namespace `testbed`. An alert has paged you. Find out why it fired, \
 establish the root cause, and file an incident report.
 
 # Access
 
+"""
+
+_OBSERVE = """\
 You are in observe mode. Every tool you have is read-only: you cannot change \
 anything in the cluster. Nobody else is investigating. The investigation ends \
 when you call `submit_report`; a reply without a tool call does not end it.
+"""
 
+# Propose and auto mode: the write tools and the gate, then what happens to a
+# write that passes, then the rules for both.
+_WRITE_TOOLS = """\
+Besides the read-only tools you have four write tools: `rollback_deployment`, \
+`scale_deployment`, `restart_pod` and `revert_config`. Guardrails in code check \
+every write before anything happens and may reject it, saying why. A write that \
+passes is tried as a server-side dry run, and its diff is recorded. \
+"""
+
+_PROPOSE = """\
+In this mode you do not execute changes yourself: a write that passes becomes \
+a proposal for a human operator, who approves or declines it. \
+"""
+
+_AUTO = f"""\
+In this mode a low-risk write is executed at once: adding replicas (up to \
+{MAX_REPLICAS}), or restarting one pod of a Deployment that has other available \
+replicas. Any other write becomes a proposal for a human operator, who approves \
+or declines it. After a change is executed, check its effect with the \
+read-only tools before you file the report. \
+"""
+
+_WRITE_RULES = """\
+The result of each write call tells you what happened to it. Use a write only \
+to fix a root cause you have established with evidence. After a change to a \
+Deployment has been executed, no other change to that Deployment is allowed in \
+this investigation. Nobody else is investigating. The investigation ends when \
+you call `submit_report`; a reply without a tool call does not end it.
+"""
+
+_ACCESS = {
+    PolicyMode.OBSERVE: _OBSERVE,
+    PolicyMode.PROPOSE: f"You are in propose mode. {_WRITE_TOOLS}{_PROPOSE}{_WRITE_RULES}",
+    PolicyMode.AUTO: f"You are in auto mode. {_WRITE_TOOLS}{_AUTO}{_WRITE_RULES}",
+}
+
+_INTRODUCTION = """
 # The system
 
 Four Go services, each a Deployment named after the service:
@@ -122,14 +169,14 @@ at the top of a result you have received is rejected.
 """
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(mode: PolicyMode = PolicyMode.OBSERVE) -> str:
     components = ", ".join(f"`{component}`" for component in Component)
     categories = "\n".join(
         f"- `{category}`: {definition}" for category, definition in CATEGORY_DEFINITIONS.items()
     )
     rules = "\n".join(f"{number}. {rule}" for number, rule in enumerate(CHOOSING_RULES, start=1))
     return (
-        f"{_INTRODUCTION}\n"
+        f"{_OPENING}{_ACCESS[mode]}{_INTRODUCTION}\n"
         f"Components: {components}.\n\n"
         f"Fault categories:\n\n{categories}\n\n"
         f"Rules for choosing the pair:\n\n{rules}\n\n"
@@ -137,4 +184,10 @@ def build_system_prompt() -> str:
     )
 
 
-SYSTEM_PROMPT = build_system_prompt()
+# Built once per mode, so every request of a run sends the identical string.
+_PROMPTS = {mode: build_system_prompt(mode) for mode in PolicyMode}
+SYSTEM_PROMPT = _PROMPTS[PolicyMode.OBSERVE]
+
+
+def system_prompt(mode: PolicyMode) -> str:
+    return _PROMPTS[mode]

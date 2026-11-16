@@ -17,6 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from oncall.agent.guardrails.policy import PolicyMode
+from oncall.agent.guardrails.record import ActionRecord, Decision
 from oncall.agent.tools.base import strict_schema
 from oncall.chaos.taxonomy import Component, FaultCategory, RemediationAction
 
@@ -80,8 +82,19 @@ class Submission(_Part):
     )
 
 
-def submit_report_definition() -> dict[str, Any]:
+# In observe mode the field's own description says nothing has been changed.
+# With write tools that is no longer true, so these modes replace it.
+_ACTIONS_WITH_WRITES = (
+    "What should be done to resolve the incident, including any write you executed or "
+    "proposed in this investigation."
+)
+
+
+def submit_report_definition(mode: PolicyMode = PolicyMode.OBSERVE) -> dict[str, Any]:
     """The `submit_report` tool as the Messages API wants it."""
+    schema = strict_schema(Submission)
+    if mode is not PolicyMode.OBSERVE:
+        schema["properties"]["recommended_actions"]["description"] = _ACTIONS_WITH_WRITES
     return {
         "name": SUBMIT_REPORT,
         "description": (
@@ -89,7 +102,7 @@ def submit_report_definition() -> dict[str, Any]:
             "when you have established the root cause or have used your budget. If the "
             "report is rejected, the result says why; correct it and submit again."
         ),
-        "input_schema": strict_schema(Submission),
+        "input_schema": schema,
         "strict": True,
     }
 
@@ -164,6 +177,21 @@ class CitedCall(BaseModel):
     input: dict[str, Any]
 
 
+class WriteCounts(BaseModel):
+    """How many write tool calls ended in each decision of the gate."""
+
+    executed: int
+    proposed: int
+    declined: int
+    rejected: int
+    failed: int
+
+    @classmethod
+    def of(cls, actions: list[ActionRecord]) -> "WriteCounts":
+        decisions = [action.decision for action in actions]
+        return cls(**{decision.value: decisions.count(decision) for decision in Decision})
+
+
 class RunStats(BaseModel):
     """Facts about the run, filled in by code. None of it is the model's claim."""
 
@@ -179,6 +207,7 @@ class RunStats(BaseModel):
     tool_errors: int
     refused_tool_calls: int
     rejected_submissions: int
+    write_actions: WriteCounts
     input_tokens: int
     cache_write_tokens: int
     cache_read_tokens: int
@@ -189,11 +218,17 @@ class RunStats(BaseModel):
 
 
 class IncidentReport(BaseModel):
-    """`report.json`: the page, the model's submission, and the run's statistics."""
+    """`report.json`: the page, the model's submission, and the run's statistics.
+
+    `actions` is every write the model attempted and what the gate did with
+    it, from the gate's own records: what the cluster saw, not what the model
+    says it did.
+    """
 
     page: str
     submission: Submission | None
     cited_calls: list[CitedCall]
+    actions: list[ActionRecord]
     run: RunStats
 
 
@@ -232,7 +267,8 @@ def render_markdown(report: IncidentReport) -> str:
             f"- `{action.action}` on `{action.component}`: {action.rationale}"
             for action in submission.recommended_actions
         ]
-        out += ["", "Policy mode was `observe`: nothing in the cluster was changed.", ""]
+        out.append("")
+    out += _render_actions(report)
     out += [
         "## Run",
         "",
@@ -246,6 +282,7 @@ def render_markdown(report: IncidentReport) -> str:
         f"| Tool calls | {run.tool_calls} ({run.tool_errors} returned an error, "
         f"{run.refused_tool_calls} refused) |",
         f"| Rejected submissions | {run.rejected_submissions} |",
+        f"| Write actions | {_counts(run.write_actions)} |",
         f"| Tokens | {run.input_tokens} input, {run.cache_write_tokens} cache write, "
         f"{run.cache_read_tokens} cache read, {run.output_tokens} output |",
         f"| Cost | ${run.cost_usd:.4f} (prices from {run.price_source}, "
@@ -253,6 +290,39 @@ def render_markdown(report: IncidentReport) -> str:
         "",
     ]
     return "\n".join(out)
+
+
+def _render_actions(report: IncidentReport) -> list[str]:
+    """What the agent changed, or tried to, as the gate recorded it."""
+    mode = report.run.policy_mode
+    if mode == PolicyMode.OBSERVE and not report.actions:
+        return ["Policy mode was `observe`: nothing in the cluster was changed.", ""]
+    out = ["## Write actions", "", f"Policy mode: `{mode}`.", ""]
+    if not report.actions:
+        return [*out, "The agent attempted no write.", ""]
+    for number, action in enumerate(report.actions, start=1):
+        what = action.summary or f"`{action.action}` {_inline(action.input)}"
+        out.append(f"{number}. **{action.decision}**: {what}")
+        if action.risk:
+            out.append(f"   - Risk: {action.risk} ({action.risk_reason})")
+        if action.step:
+            out.append(f"   - Rejected at the `{action.step}` check: {action.reason}")
+        elif action.decision != Decision.PROPOSED:
+            out.append(f"   - {action.reason}")
+        if action.approved_by:
+            out.append(f"   - Decided by: {action.approved_by}")
+        if action.diff:
+            out += [
+                "",
+                "   ```diff",
+                *(f"   {line}" for line in action.diff.splitlines()),
+                "   ```",
+            ]
+    return [*out, ""]
+
+
+def _counts(counts: WriteCounts) -> str:
+    return ", ".join(f"{value} {name}" for name, value in counts.model_dump().items())
 
 
 def _cell(text: str) -> str:

@@ -19,9 +19,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from oncall.agent.guardrails.gate import tool_definitions
+from oncall.agent.guardrails.policy import Policy, PolicyMode
+from oncall.agent.guardrails.record import ActionRecord
 from oncall.agent.llm import ModelError, Reply
 from oncall.agent.loop import Agent, Limits, RunConfig, RunResult
-from oncall.agent.prompt import SYSTEM_PROMPT
+from oncall.agent.prompt import system_prompt
 from oncall.agent.report import submit_report_definition
 from oncall.agent.tools.base import ToolOutcome
 from oncall.agent.trace import MemoryTrace, digest
@@ -65,7 +68,12 @@ class ReplayClient:
 
 
 class ReplayToolbox:
-    """Answers each tool call with the recorded result, after checking it is the same call."""
+    """Answers each tool call with the recorded result, after checking it is the same call.
+
+    A write tool call is answered from the recording too, gate decision
+    included: a replay never reaches a cluster, so it never runs the gate.
+    The gate itself is tested in tests/agent/test_gate.py.
+    """
 
     def __init__(self, records: list[dict[str, Any]], definitions: list[dict[str, Any]]) -> None:
         self._calls = [record for record in records if record["kind"] == "tool_call"]
@@ -85,7 +93,12 @@ class ReplayToolbox:
                 f"call {recorded['call_id']}: the trace has {recorded['tool']} {recorded['input']}, "
                 f"the loop called {name} {raw_input}"
             )
-        return ToolOutcome(recorded["output"], recorded["is_error"])
+        action = recorded.get("action")
+        return ToolOutcome(
+            recorded["output"],
+            recorded["is_error"],
+            ActionRecord.model_validate(action) if action is not None else None,
+        )
 
 
 def replay_clock(records: list[dict[str, Any]]) -> Callable[[], float]:
@@ -125,25 +138,32 @@ class Replay:
     prompt_changed: bool
 
 
-def replay(records: list[dict[str, Any]], tool_definitions: list[dict[str, Any]]) -> Replay:
+def replay(
+    records: list[dict[str, Any]], definitions: list[dict[str, Any]] | None = None
+) -> Replay:
     """Run the loop against a recorded trace.
 
-    `tool_definitions` are today's definitions of the investigation tools,
-    used only to tell whether the prompt has changed since the recording.
+    `definitions` are the tools the run is checked against, to tell whether
+    the prompt has changed since the recording. By default they are today's
+    tools for the run's policy mode; the loop's own tests pass their fake tools.
     """
     start = _only(records, "run_start")
     end = _only(records, "run_end")
+    policy = policy_of(records)
     config = RunConfig(
         model=start["model"],
         effort=start["effort"],
         max_tokens=start["max_tokens"],
         limits=Limits(**start["limits"]),
+        policy=policy,
     )
+    if definitions is None:
+        definitions = tool_definitions(policy.mode)
     trace = MemoryTrace()
     agent = Agent(
         config,
         ReplayClient(records),
-        ReplayToolbox(records, tool_definitions),
+        ReplayToolbox(records, definitions),
         trace,
         replay_clock(records),
     )
@@ -156,7 +176,10 @@ def replay(records: list[dict[str, Any]], tool_definitions: list[dict[str, Any]]
         if name not in ("seq", "at", "kind") and end[name] != replayed_end.get(name)
     ]
     recorded_prompt = (start["system"], start["tools"])
-    current_prompt = (SYSTEM_PROMPT, [*tool_definitions, submit_report_definition()])
+    current_prompt = (
+        system_prompt(policy.mode),
+        [*definitions, submit_report_definition(policy.mode)],
+    )
     return Replay(
         config=config,
         page=start["page"],
@@ -164,6 +187,23 @@ def replay(records: list[dict[str, Any]], tool_definitions: list[dict[str, Any]]
         records=trace.records,
         differences=differences,
         prompt_changed=recorded_prompt != current_prompt,
+    )
+
+
+def policy_of(records: list[dict[str, Any]]) -> Policy:
+    """The policy a run was made under, from its `session` record.
+
+    The runner writes that record. A trace written by the loop alone, as in
+    the loop's tests, has none, and was made with the default: observe mode.
+    """
+    sessions = [record for record in records if record["kind"] == "session"]
+    if not sessions:
+        return Policy()
+    session = _only(records, "session")
+    return Policy(
+        mode=PolicyMode(session["policy_mode"]),
+        # Traces from before Phase 4 had no write tools and do not record it.
+        max_write_actions=session.get("max_write_actions", Policy().max_write_actions),
     )
 
 

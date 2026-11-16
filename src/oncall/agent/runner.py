@@ -10,23 +10,21 @@ then writes the report. A run directory holds three files:
 """
 
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 
 from oncall.agent.llm import ModelClient
-from oncall.agent.loop import Agent, RunConfig, RunResult
+from oncall.agent.loop import Agent, RunConfig, RunResult, Trace
 from oncall.agent.pricing import PRICE_RETRIEVED, PRICE_SOURCE
-from oncall.agent.report import CitedCall, IncidentReport, RunStats, render_markdown
+from oncall.agent.report import CitedCall, IncidentReport, RunStats, WriteCounts, render_markdown
 from oncall.agent.tools.base import ToolRunner
 from oncall.agent.trace import TraceWriter
 
 TRACE_FILE = "trace.jsonl"
 REPORT_JSON = "report.json"
 REPORT_MARKDOWN = "report.md"
-
-# Phase 3 has no write tools, so there is nothing for a policy to decide yet.
-POLICY_MODE = "observe"
 
 
 def build_report(
@@ -42,10 +40,11 @@ def build_report(
             for call in result.calls
             if call.call_id in cited
         ],
+        actions=result.actions,
         run=RunStats(
             model=config.model,
             effort=config.effort,
-            policy_mode=POLICY_MODE,
+            policy_mode=config.policy.mode,
             started_at=started_at,
             duration_seconds=result.duration_seconds,
             outcome=result.outcome.value,
@@ -55,6 +54,7 @@ def build_report(
             tool_errors=sum(call.is_error for call in result.calls),
             refused_tool_calls=result.refused_tool_calls,
             rejected_submissions=result.rejected_submissions,
+            write_actions=WriteCounts.of(result.actions),
             input_tokens=result.input_tokens,
             cache_write_tokens=result.cache_write_tokens,
             cache_read_tokens=result.cache_read_tokens,
@@ -74,15 +74,18 @@ def report_json(report: IncidentReport) -> str:
 def investigate(
     config: RunConfig,
     client: ModelClient,
-    tools: ToolRunner,
+    make_tools: Callable[[Trace], ToolRunner],
     page: str,
     directory: Path,
     secrets: tuple[str, ...],
 ) -> IncidentReport:
     """Run the agent on `page` and write the trace and the report into `directory`.
 
+    `make_tools` builds the tools once the trace is open: the write gate
+    records each dry run in the trace before it executes anything.
+
     `secrets` are values that must never reach the trace (the API key, the
-    cluster token). Nothing passes them to the trace; the writer refuses any
+    cluster tokens). Nothing passes them to the trace; the writer refuses any
     line that contains one, in case something ever does.
     """
     started_at = datetime.now(UTC)
@@ -91,9 +94,11 @@ def investigate(
         trace.write(
             "session",
             started_at=started_at.isoformat(),
-            policy_mode=POLICY_MODE,
+            policy_mode=config.policy.mode.value,
+            max_write_actions=config.policy.max_write_actions,
             anthropic_sdk=version("anthropic"),
         )
+        tools = make_tools(trace)
         agent = Agent(config, client, tools, trace, lambda: time.monotonic() - started)
         result = agent.run(page)
     report = build_report(page, config, result, started_at)

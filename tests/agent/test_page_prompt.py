@@ -6,11 +6,13 @@ from pathlib import Path
 
 import yaml
 
+from oncall.agent.guardrails.gate import tool_definitions
+from oncall.agent.guardrails.policy import PolicyMode
 from oncall.agent.page import firing_alerts, render_page
-from oncall.agent.prompt import CHOOSING_RULES, SYSTEM_PROMPT, build_system_prompt
+from oncall.agent.prompt import CHOOSING_RULES, SYSTEM_PROMPT, build_system_prompt, system_prompt
 from oncall.agent.report import submit_report_definition
-from oncall.agent.tools import read_only_definitions
 from oncall.agent.tools.http import PROMETHEUS_URL
+from oncall.agent.trace import read_trace
 from oncall.chaos.taxonomy import CATEGORY_DEFINITIONS, Component
 from tests.agent.conftest import REPO, FakeFetch
 
@@ -23,8 +25,34 @@ INCIDENTS = REPO / "incidents"
 def test_the_prompt_is_byte_stable() -> None:
     """It is cached by the API: a prompt that differed between runs would never hit the cache."""
     assert build_system_prompt() == SYSTEM_PROMPT
-    # Nothing that looks like a date, a clock time or a run ID.
-    assert not re.search(r"20\d\d-\d\d-\d\d|\d\d:\d\d:\d\d", SYSTEM_PROMPT)
+    for mode in PolicyMode:
+        assert build_system_prompt(mode) == system_prompt(mode)
+        # Nothing that looks like a date, a clock time or a run ID.
+        assert not re.search(r"20\d\d-\d\d-\d\d|\d\d:\d\d:\d\d", system_prompt(mode))
+
+
+def test_observe_mode_is_told_exactly_what_the_phase_3_runs_were_told() -> None:
+    """Adding write tools did not change the observe-mode agent those runs measured."""
+    trace = REPO / "results" / "phase3-agent" / "redis-maxmemory-too-low" / "trace.jsonl"
+    start = next(record for record in read_trace(trace) if record["kind"] == "run_start")
+    assert start["system"] == system_prompt(PolicyMode.OBSERVE)
+    assert start["tools"] == [
+        *tool_definitions(PolicyMode.OBSERVE),
+        submit_report_definition(PolicyMode.OBSERVE),
+    ]
+
+
+def test_the_modes_differ_only_in_what_they_say_about_access() -> None:
+    """Everything from the description of the system onwards is the same text."""
+    tails = {system_prompt(mode).split("# The system", 1)[1] for mode in PolicyMode}
+    assert len(tails) == 1
+    observe, propose, auto = (system_prompt(mode) for mode in PolicyMode)
+    assert "read-only: you cannot change anything" in observe
+    for prompt in (propose, auto):
+        for tool in ("rollback_deployment", "scale_deployment", "restart_pod", "revert_config"):
+            assert f"`{tool}`" in prompt
+    assert "a proposal for a human operator" in propose
+    assert "low-risk write is executed at once" in auto
 
 
 def test_the_prompt_has_every_category_in_the_rubrics_words() -> None:
@@ -56,7 +84,10 @@ def test_nothing_the_model_is_given_names_an_incident_or_its_tooling() -> None:
     Incident IDs, titles and the injector's vocabulary must not appear: the
     agent is an on-call engineer, not a participant in a test.
     """
-    given = SYSTEM_PROMPT + str(read_only_definitions()) + str(submit_report_definition())
+    given = "".join(
+        system_prompt(mode) + str(tool_definitions(mode)) + str(submit_report_definition(mode))
+        for mode in PolicyMode
+    )
     lowered = given.lower()
     for path in sorted(INCIDENTS.glob("*.yaml")):
         incident = yaml.safe_load(path.read_text())

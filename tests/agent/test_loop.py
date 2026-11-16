@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from oncall.agent.guardrails.record import ActionRecord, Decision, Step
 from oncall.agent.llm import ModelError, Reply
 from oncall.agent.loop import NUDGE, Agent, Limits, Outcome, RunConfig, RunResult
 from oncall.agent.prompt import SYSTEM_PROMPT
@@ -574,3 +575,62 @@ def test_replay_needs_a_complete_trace() -> None:
     records = [r for r in scripted_trace() if r["kind"] != "run_end"]
     with pytest.raises(ReplayMismatchError, match="exactly one run_end"):
         replay(records, FakeTools().definitions())
+
+
+# ---- Write tools -----------------------------------------------------------------------
+
+
+class ToolsWithAWrite(FakeTools):
+    """`look`, plus a write tool `fix` whose outcome carries a gate decision."""
+
+    DECISION = ActionRecord(
+        action="fix",
+        input={"what": "redis"},
+        decision=Decision.REJECTED,
+        step=Step.ALLOW_LIST,
+        reason="not on redis",
+    )
+
+    def definitions(self) -> list[dict[str, Any]]:
+        fix = {**super().definitions()[0], "name": "fix", "description": "Fix something."}
+        return [*super().definitions(), fix]
+
+    def call(self, name: str, raw_input: dict[str, Any]) -> ToolOutcome:
+        if name == "fix":
+            self.calls.append((name, raw_input))
+            return ToolOutcome(
+                "Rejected. Nothing was changed.", is_error=True, action=self.DECISION
+            )
+        return super().call(name, raw_input)
+
+
+def fix(tool_use_id: str) -> dict[str, Any]:
+    return {"type": "tool_use", "id": tool_use_id, "name": "fix", "input": {"at": "redis"}}
+
+
+def run_with_a_write() -> Run:
+    client, tools, trace = (
+        ScriptedClient([reply(look("tu_1", "redis"), fix("tu_2")), reply(submit("tu_3", "c1"))]),
+        ToolsWithAWrite(),
+        MemoryTrace(),
+    )
+    result = Agent(RunConfig(model=MODEL), client, tools, trace, Clock()).run(PAGE)
+    return Run(result, client, tools, trace)
+
+
+def test_a_write_decision_is_recorded_with_its_call_and_counted() -> None:
+    done = run_with_a_write()
+    assert done.result.actions == [ToolsWithAWrite.DECISION]
+    look_record, fix_record = [r for r in done.trace.records if r["kind"] == "tool_call"]
+    # A read tool's record is what it was before write tools existed.
+    assert "action" not in look_record
+    assert fix_record["action"] == ToolsWithAWrite.DECISION.model_dump(mode="json")
+    assert (fix_record["call_id"], fix_record["is_error"]) == ("c2", True)
+
+
+def test_a_write_decision_survives_a_replay() -> None:
+    done = run_with_a_write()
+    records = json.loads(json.dumps(done.trace.records))
+    replayed = replay(records, ToolsWithAWrite().definitions())
+    assert replayed.differences == []
+    assert replayed.result.actions == [ToolsWithAWrite.DECISION]

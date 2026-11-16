@@ -6,6 +6,8 @@ from typing import Annotated, Any
 import pytest
 from pydantic import Field
 
+from oncall.agent.guardrails.gate import tool_definitions
+from oncall.agent.guardrails.policy import PolicyMode
 from oncall.agent.report import submit_report_definition
 from oncall.agent.tools import read_only_definitions
 from oncall.agent.tools.base import (
@@ -19,7 +21,13 @@ from oncall.agent.tools.base import (
     bound,
 )
 
-ALL_DEFINITIONS = [*read_only_definitions(), submit_report_definition()]
+# Every tool the model can be given, in any mode: the read tools, the write
+# tools, and both variants of submit_report.
+ALL_DEFINITIONS = [
+    *tool_definitions(PolicyMode.AUTO),
+    submit_report_definition(PolicyMode.OBSERVE),
+    submit_report_definition(PolicyMode.AUTO),
+]
 
 
 class Echo(Params):
@@ -45,6 +53,11 @@ def test_the_tool_list_is_what_the_architecture_says() -> None:
         "kube_describe",
         "kube_events",
         "deploy_history",
+        "rollback_deployment",
+        "scale_deployment",
+        "restart_pod",
+        "revert_config",
+        "submit_report",
         "submit_report",
     ]
 
@@ -91,14 +104,20 @@ def test_every_tool_and_parameter_is_described(definition: dict[str, Any]) -> No
 
 def test_no_tool_takes_a_command_or_a_namespace() -> None:
     """The model fills in typed fields. It never chooses the namespace or passes a command line."""
-    for definition in read_only_definitions():
+    for definition in tool_definitions(PolicyMode.AUTO):
         names = set(definition["input_schema"]["properties"])
         assert not names & {"namespace", "command", "args", "argv", "shell", "flags"}
 
 
 def test_definitions_are_identical_every_time() -> None:
     """They are the start of the cached prompt: any difference would cost a cache miss."""
-    assert [*read_only_definitions(), submit_report_definition()] == ALL_DEFINITIONS
+    for mode in PolicyMode:
+        first = [*tool_definitions(mode), submit_report_definition(mode)]
+        assert [*tool_definitions(mode), submit_report_definition(mode)] == first
+    assert [*read_only_definitions(), submit_report_definition()] == [
+        *tool_definitions(PolicyMode.OBSERVE),
+        submit_report_definition(PolicyMode.OBSERVE),
+    ]
 
 
 def test_a_valid_call_runs_the_tool() -> None:
