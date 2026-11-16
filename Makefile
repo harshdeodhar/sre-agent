@@ -138,6 +138,9 @@ healthy: ## Report whether the testbed is in its intended, alert-free state
 AGENT := uv run python -m oncall.agent
 # Development and smoke tests use the cheapest model. Override per command.
 MODEL ?= claude-haiku-5-5
+# observe: read only. propose: writes are dry-run and need a human (add
+# ARGS=--approve to be asked on the terminal). auto: low-risk writes execute.
+MODE ?= observe
 
 # The agent reads the API key from the environment and nowhere else. This
 # loads .env into the environment of the agent's own command, and of nothing
@@ -146,8 +149,8 @@ MODEL ?= claude-haiku-5-5
 LOAD_ENV := if [ -z "$${ANTHROPIC_API_KEY:-}" ] && [ -f .env ]; then set -a; . ./.env; set +a; fi
 
 .PHONY: agent
-agent: ## Investigate the alerts firing now, read-only: make agent [MODEL=<id>] [ARGS="--wait 300"]
-	@$(LOAD_ENV); $(AGENT) run --model $(MODEL) $(ARGS)
+agent: ## Investigate the alerts firing now: make agent [MODEL=<id>] [MODE=observe|propose|auto] [ARGS="--wait 300"]
+	@$(LOAD_ENV); $(AGENT) run --model $(MODEL) --mode $(MODE) $(ARGS)
 
 .PHONY: agent-replay
 agent-replay: ## Re-run the loop from a recorded trace, with no API or cluster: make agent-replay TRACE=<trace.jsonl>
